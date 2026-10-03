@@ -31,6 +31,16 @@ def fr_pct(value):
 
 
 @register.filter
+def fr_pct0(value):
+    """Ratio -> « +47 % » (sans décimale, pour les pastilles) ; None -> « n.d. »."""
+    if value is None:
+        return "n.d."
+    rounded = round(value * 100)
+    sign = "+" if rounded > 0 else ("−" if rounded < 0 else "")  # pas de « −0 % »
+    return f"{sign}{abs(rounded)}{NNBSP}%"
+
+
+@register.filter
 def fr_decimal(value):
     if value is None:
         return "n.d."

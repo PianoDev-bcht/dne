@@ -56,3 +56,4 @@ class DisplayNameTests(SimpleTestCase):
         self.assertEqual(full_name("La Réunion"), "Académie de La Réunion")
         self.assertEqual(full_name("Noumea"), "Vice-rectorat de Nouvelle-Calédonie")
         self.assertEqual(full_name("Polynesie"), "Vice-rectorat de Polynésie française")
+        self.assertEqual(full_name(""), "Académie de ")  # pas d'élision sur un nom vide

@@ -29,6 +29,13 @@ class DailySeriesTests(SimpleTestCase):
         self.assertEqual(s[1]["new_users"], -2)
         self.assertTrue(s[1]["is_decrease"])
 
+    def test_series_extended_to_end_keeps_last_cumulative(self):
+        # Domaine absent des derniers snapshots : cumul reporté, flux nul, sans marquer de trou.
+        s = metrics.build_daily_series([(D0, 10, 100), (D0 + timedelta(1), 15, 130)], end=D0 + timedelta(3))
+        self.assertEqual([p["cumulative_users"] for p in s], [10, 15, 15, 15])
+        self.assertEqual([p["new_users"] for p in s[2:]], [0, 0])
+        self.assertFalse(any(p["is_gap"] for p in s))
+
     def test_empty(self):
         self.assertEqual(metrics.build_daily_series([]), [])
         self.assertIsNone(metrics.compute_kpis([])["new_users"])
@@ -111,6 +118,13 @@ class AggregateTests(SimpleTestCase):
         self.assertEqual(agg[-1]["new_users"], 11)
         self.assertIsNone(agg[0]["new_users"])
 
+    def test_decrease_floored_per_domain_so_parts_equal_total(self):
+        a = metrics.build_daily_series(linear(8))
+        b = metrics.build_daily_series([(D0 + timedelta(i), 100 - (5 if i == 7 else 0), 0) for i in range(8)])
+        total = metrics.compute_kpis(metrics.aggregate_series([a, b]))["new_users"]
+        self.assertEqual(total, sum(metrics.compute_kpis(s)["new_users"] for s in (a, b)))
+        self.assertEqual(total, 70)
+
     def test_late_domain_first_value_not_counted_as_flow(self):
         a = metrics.build_daily_series(linear(3))
         late = metrics.build_daily_series([(D0 + timedelta(2), 500, 5000)])
@@ -122,9 +136,13 @@ class AggregateTests(SimpleTestCase):
 class SignalTests(SimpleTestCase):
     NATIONAL = {"new_users_change_pct": 0.0, "messages_change_pct": 0.05}
 
-    def kpis(self, users_pct=0.0, users_prev=50, msg_pct=0.05, msg_prev=1000):
+    def kpis(self, users_pct=0.0, users_prev=50, msg_pct=0.05, msg_prev=1000, intensity_pct=0.0):
         return {"new_users_change_pct": users_pct, "previous_new_users": users_prev,
-                "messages_change_pct": msg_pct, "previous_messages": msg_prev}
+                "messages_change_pct": msg_pct, "previous_messages": msg_prev,
+                "activity_change_pct": intensity_pct}
+
+    def levels(self, signals):
+        return [(s["kind"], s["metric"], s["level"]) for s in signals]
 
     def test_no_signal_when_in_line_with_national(self):
         self.assertEqual(metrics.detect_signals(self.kpis(), self.NATIONAL), [])
@@ -132,21 +150,68 @@ class SignalTests(SimpleTestCase):
     def test_gap_to_national_trend_uses_same_7_day_change(self):
         k = self.kpis(users_pct=-0.44)
         signals = metrics.detect_signals(k, self.NATIONAL)
-        self.assertEqual([(s["kind"], s["metric"]) for s in signals], [("ecart_inferieur", "new_users")])
+        self.assertEqual(self.levels(signals), [("ecart_inferieur", "new_users", "strong")])
         self.assertEqual(signals[0]["evolution"], k["new_users_change_pct"])  # cohérent avec le KPI
         self.assertAlmostEqual(signals[0]["gap"], -0.44)
+
+    def test_two_levels(self):
+        national = {"new_users_change_pct": -0.01, "messages_change_pct": 0.05}
+        # France −1 %, académie +29 % : 30 points d'écart -> signal fort
+        strong = metrics.detect_signals(self.kpis(users_pct=0.29, intensity_pct=0.1), national)
+        self.assertEqual(self.levels(strong)[0], ("ecart_superieur", "new_users", "strong"))
+        # 20 points -> à surveiller ; 10 points -> rien
+        self.assertEqual(self.levels(metrics.detect_signals(self.kpis(users_pct=0.19, intensity_pct=0.1), national))[0],
+                         ("ecart_superieur", "new_users", "watch"))
+        self.assertEqual(metrics.detect_signals(self.kpis(users_pct=0.09, intensity_pct=0.1), national), [])
+
+    def test_strong_signals_listed_first(self):
+        national = {"new_users_change_pct": 0.0, "messages_change_pct": 0.05}
+        # +20 % vs France 0 % -> diffusion à surveiller ; intensité −10 % -> activation forte
+        signals = metrics.detect_signals(self.kpis(users_pct=0.20, intensity_pct=-0.10), national)
+        self.assertEqual([(s["kind"], s["level"]) for s in signals],
+                         [("activation", "strong"), ("ecart_superieur", "watch")])
+
+    def test_messages_gap_is_not_a_signal(self):
+        # L'activité est un contexte, pas un signal : +60 % de messages ne déclenche rien
+        self.assertEqual(metrics.detect_signals(self.kpis(msg_pct=0.65), self.NATIONAL), [])
 
     def test_common_drop_is_not_a_signal(self):
         # Vacances : tout le territoire baisse de 50 % -> pas d'écart propre à l'académie
         national = {"new_users_change_pct": -0.5, "messages_change_pct": -0.5}
         self.assertEqual(metrics.detect_signals(self.kpis(users_pct=-0.55, msg_pct=-0.45), national), [])
 
-    def test_small_base_ignored(self):
-        self.assertEqual(metrics.detect_signals(self.kpis(users_pct=2.0, users_prev=5), self.NATIONAL), [])
+    def test_minimum_volume_on_larger_of_two_weeks(self):
+        national = {"new_users_change_pct": -0.01, "messages_change_pct": 0.05}
+        def kinds(prev, cur):
+            k = self.kpis(users_pct=cur / prev - 1, users_prev=prev, intensity_pct=0.5)
+            k["new_users"] = cur
+            return [(s["metric"], s["level"]) for s in metrics.detect_signals(k, national)]
+        self.assertEqual(kinds(26, 82), [("new_users", "strong")])  # Grenoble : 82 cette semaine suffit
+        self.assertEqual(kinds(39, 27), [])                         # Montpellier : aucune semaine à 50
+        self.assertEqual(kinds(49, 49 * 1.7), [("new_users", "strong")])
+        self.assertEqual(kinds(29, 49), [])                         # Dijon : 49 au plus
 
-    def test_divergence(self):
-        signals = metrics.detect_signals(self.kpis(users_pct=0.20, msg_pct=-0.18), self.NATIONAL)
-        self.assertIn("divergence", [s["kind"] for s in signals])
+    def test_minimum_volume(self):
+        self.assertEqual(metrics.SIGNAL_MIN_BASE, {"new_users": 50, "messages": 400})
+        self.assertEqual(metrics.detect_signals(self.kpis(users_pct=2.0, users_prev=49), self.NATIONAL), [])
+
+    def test_activation_when_usage_does_not_follow(self):
+        def levels(users, intensity):
+            # Écarts nationaux neutralisés : seul le signal d'activation est testé
+            national = {"new_users_change_pct": users, "messages_change_pct": 0.05}
+            return [(s["kind"], s["level"]) for s in
+                    metrics.detect_signals(self.kpis(users_pct=users, intensity_pct=intensity), national)]
+        self.assertEqual(levels(0.09, -0.16), [("activation", "strong")])  # Rennes : intensité en baisse
+        self.assertEqual(levels(0.20, -0.05), [("activation", "strong")])  # −5 % = en baisse
+        self.assertEqual(levels(0.25, -0.04), [("activation", "watch")])   # intensité stable
+        self.assertEqual(levels(0.25, 0.0), [("activation", "watch")])
+        self.assertEqual(levels(0.18, 0.13), [])                           # l'usage suit
+        self.assertEqual(levels(0.04, -0.20), [])                          # diffusion stable
+        self.assertEqual(levels(0.25, None), [])                           # intensité non calculable
+
+    def test_activation_needs_both_volumes(self):
+        national = {"new_users_change_pct": 0.25, "messages_change_pct": 0.05}
+        self.assertEqual(metrics.detect_signals(self.kpis(users_pct=0.25, msg_prev=100), national), [])
 
 
 class TrendThresholdTests(SimpleTestCase):

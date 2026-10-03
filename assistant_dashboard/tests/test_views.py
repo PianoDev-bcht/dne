@@ -1,11 +1,11 @@
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
+from unittest import mock
 
 from django.test import TestCase
 from django.urls import reverse
 
 from assistant_dashboard.models import BetaLocation, ProductionObservation
 from assistant_dashboard.services.sync import PARIS
-from datetime import datetime, time
 
 
 def seed():
@@ -35,7 +35,8 @@ class DashboardPageTests(TestCase):
         self.assertEqual(r.status_code, 200)
         for kpi in ["new_users", "messages", "cumulative_users", "activity"]:
             self.assertContains(r, f'data-kpi="{kpi}"')
-        self.assertContains(r, 'class="kpi kpi-main"', count=2)
+        self.assertContains(r, 'class="kpi-primary metric"', count=1)  # un seul KPI piloté : la diffusion
+        self.assertContains(r, 'class="kpi-small metric"', count=3)
         self.assertContains(r, "77")  # 7 × (10 + 1) nouveaux comptes, Lyon + Pix
         self.assertContains(r, "Données au")
 
@@ -43,9 +44,66 @@ class DashboardPageTests(TestCase):
         seed()
         r = self.client.get(reverse("assistant_dashboard:dashboard"))
         self.assertContains(r, "Diffusion stable")
-        self.assertContains(r, "Parc total de comptes")
+        self.assertContains(r, "KPI principal")
+        self.assertContains(r, "Indicateurs secondaires")
+        self.assertContains(r, "Parc total")
         self.assertContains(r, "depuis le lancement")
-        self.assertContains(r, "messages / 100 comptes")
+        self.assertContains(r, "messages pour 100 comptes")
+        for name in ("Diffusion", "Activité", "Intensité", "Parc total"):  # mêmes noms partout
+            self.assertContains(r, f'class="metric-name">{name}')
+
+    def test_piloting_sections_in_order(self):
+        seed()
+        html = self.client.get(reverse("assistant_dashboard:dashboard")).content.decode()
+        titles = ["KPI principal", "Indicateurs secondaires", "Diagnostic territorial",
+                  "Actions recommandées", "Évolution historique"]
+        positions = [html.index(t) for t in titles]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(html.count('<article class="reco'), 3)
+        # Chaque section porte son étape, dans l'ordre : Détecter, Expliquer, Agir.
+        steps = [html.index(f'<span class="step-name">{name}</span>') for name in ("Détecter", "Expliquer", "Agir")]
+        self.assertEqual(steps, sorted(steps))
+        self.assertLess(steps[0], html.index("KPI principal"))
+        self.assertLess(steps[1], html.index("Diagnostic territorial"))
+        self.assertLess(steps[2], html.index("Actions recommandées"))
+
+    def test_cards_stay_short(self):
+        seed()
+        html = self.client.get(reverse("assistant_dashboard:dashboard")).content.decode()
+        main = html[html.index("<main"):html.index("</main>")]
+        self.assertNotIn("kpi-purpose", main)  # les nuances passent en infobulle
+        self.assertNotIn("Analyse à mener", main)
+
+    def test_recommendation_status(self):
+        from assistant_dashboard.views import reco_status
+        kpis = {"new_users_change_pct": 0.2, "activity_change_pct": -0.1}
+        def sig(kind, metric, level, severity, **values):
+            return {"kind": kind, "metric": metric, "level": level, "severity": severity, **values}
+        signals = [
+            {"id": 1, "name": "Bordeaux", "signals": [
+                sig("ecart_superieur", "new_users", "strong", 0.48, evolution=0.47, national=-0.01),
+                sig("ecart_inferieur", "messages", "strong", 0.40, evolution=-0.35, national=0.05)]},
+            {"id": 6, "name": "Grenoble", "signals": [
+                sig("ecart_superieur", "new_users", "strong", 2.16, evolution=2.15, national=-0.01)]},
+            {"id": 2, "name": "Nancy-Metz", "signals": [sig("ecart_inferieur", "new_users", "strong", 0.33)]},
+            {"id": 3, "name": "Rennes", "signals": [
+                sig("activation", "both", "strong", 0.25, evolution_users=0.09, evolution_intensity=-0.16)]},
+            {"id": 7, "name": "Orléans-Tours", "signals": [
+                sig("activation", "both", "watch", 0.27, evolution_users=0.27, evolution_intensity=0.0)]},
+            # Signaux « à surveiller » : visibles dans le diagnostic, jamais dans les actions
+            {"id": 4, "name": "Lyon", "signals": [sig("ecart_superieur", "new_users", "watch", 0.2)]},
+            {"id": 5, "name": "Nantes", "signals": [sig("ecart_inferieur", "new_users", "watch", 0.18)]},
+        ]
+        status = reco_status(kpis, signals)
+        names = lambda key: [a["name"] for a in status[key]]
+        self.assertEqual(names("acceleration"), ["Grenoble", "Bordeaux"])  # le plus marqué en premier
+        self.assertEqual(status["acceleration"][1]["evolution"], 0.47)       # le chiffre affiché sur la pastille
+        self.assertEqual(names("slowdown"), ["Nancy-Metz"])
+        self.assertEqual(names("activation"), ["Rennes"])
+        self.assertEqual(status["activation"][0]["evolution_intensity"], -0.16)
+        self.assertTrue(status["activation_national"])
+        self.assertFalse(reco_status({"new_users_change_pct": 0.2, "activity_change_pct": 0.1}, [])["activation_national"])
+        self.assertFalse(reco_status({"new_users_change_pct": 0.01, "activity_change_pct": -0.1}, [])["activation_national"])
 
     def test_map_has_intensity_view(self):
         seed()
@@ -86,6 +144,18 @@ class DashboardPageTests(TestCase):
         self.assertContains(r, "19 comptes hors académies")
         self.assertContains(r, "inclus dans le total national")
 
+    def test_stale_data_is_flagged_at_display_time(self):
+        seed()  # dernier snapshot : 20/09/2026
+        url = reverse("assistant_dashboard:dashboard")
+        with mock.patch("assistant_dashboard.services.dashboard_data.timezone.localdate",
+                        return_value=date(2026, 9, 21)):
+            r = self.client.get(url)
+            self.assertEqual(r.context["freshness"]["stale_days"], 1)  # avant la synchronisation du jour
+            self.assertNotContains(r, "dernier fichier il y a")
+        with mock.patch("assistant_dashboard.services.dashboard_data.timezone.localdate",
+                        return_value=date(2026, 9, 27)):
+            self.assertContains(self.client.get(url), "dernier fichier il y a 7 j")
+
     def test_forbidden_wording_absent(self):
         seed()
         html = self.client.get(reverse("assistant_dashboard:dashboard")).content.decode().lower()
@@ -112,6 +182,11 @@ class ApiTests(TestCase):
 
     def test_unknown_location_404(self):
         self.assertEqual(self.client.get(reverse("assistant_dashboard:api_location", args=[999])).status_code, 404)
+
+    def test_invalid_scope_404(self):
+        url = reverse("assistant_dashboard:api_timeseries")
+        self.assertEqual(self.client.get(url, {"scope": "abc"}).status_code, 404)
+        self.assertEqual(self.client.get(url, {"scope": "999"}).status_code, 404)
 
     def test_locations_only_contain_matched_domains(self):
         d = self.client.get(reverse("assistant_dashboard:api_locations")).json()
@@ -173,7 +248,7 @@ class ConsistencyTests(TestCase):
             for key in ("new_users", "messages", "new_users_change_pct", "messages_change_pct", "cumulative_users"):
                 self.assertEqual(detail["kpis"][key], loc[key], f"{loc['name']} {key}")
             for sig in loc["signals"]:
-                if sig["kind"] != "divergence":
+                if sig["kind"] != "activation":
                     self.assertEqual(sig["evolution"], loc[f"{sig['metric']}_change_pct"])
                     self.assertEqual(sig["national"], self.summary[f"{sig['metric']}_change_pct"])
 
@@ -181,3 +256,26 @@ class ConsistencyTests(TestCase):
         rows = self.payload["locations"] + self.payload["unlocated"]
         for key in ("new_users", "messages", "cumulative_users"):
             self.assertEqual(sum(r[key] or 0 for r in rows), self.summary[key], key)
+
+    def test_invariant_holds_with_decrease_and_missing_domain(self):
+        # Baisse de cumul chez Pix (flux ramené à 0) et Nancy-Metz absente du dernier snapshot.
+        last = date(2026, 9, 20)
+        ProductionObservation.objects.filter(domain="pix_fr", date=last).update(cumulative_users=5)
+        ProductionObservation.objects.filter(domain="ac_nancy_metz_fr", date=last).delete()
+        payload = self.client.get(reverse("assistant_dashboard:api_locations")).json()
+        summary = self.client.get(reverse("assistant_dashboard:api_summary")).json()["kpis"]
+        rows = payload["locations"] + payload["unlocated"]
+        self.assertEqual({r["end_date"] for r in rows}, {summary["end_date"]})
+        for key in ("new_users", "messages", "cumulative_users"):
+            self.assertEqual(sum(r[key] or 0 for r in rows), summary[key], key)
+        nancy = next(r for r in rows if r.get("name") == "Nancy-Metz")
+        self.assertEqual(summary["cumulative_users"], 190 + 5 + nancy["cumulative_users"])
+
+    def test_recommendation_lists_flagged_academies(self):
+        r = self.client.get(reverse("assistant_dashboard:dashboard"))
+        slowdown = r.context["reco"]["slowdown"]
+        self.assertTrue(slowdown, "Nancy-Metz doit ralentir dans ce jeu de test")
+        for a in slowdown:  # pastilles visibles, cliquables, avec le chiffre
+            self.assertContains(r, f'data-academy="{a["id"]}"')
+        self.assertContains(r, 'class="reco is-empty"')  # une carte sans académie est en retrait
+        self.assertNotContains(r, 'class="reco-more"')    # repli seulement au-delà de 4 académies

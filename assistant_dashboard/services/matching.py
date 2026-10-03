@@ -110,4 +110,4 @@ def full_name(name):
     if normalize_name(name) in VICE_RECTORATS:
         return f"Vice-rectorat de {label}"
     first = normalize_name(label)[:1]
-    return f"Académie d'{label}" if first in "aeiouy" else f"Académie de {label}"
+    return f"Académie d'{label}" if first and first in "aeiouy" else f"Académie de {label}"

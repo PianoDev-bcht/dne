@@ -18,7 +18,12 @@
     const s = pctFmt.format(Math.abs(v) * 100) + NNBSP + "%";
     return v > 0 ? "+" + s : v < 0 ? "−" + s : s;
   };
-  const fmtPct0 = (v) => (v == null ? "n.d." : (v > 0 ? "+" : v < 0 ? "−" : "") + intFmt.format(Math.abs(v) * 100) + NNBSP + "%");
+  // Signe seulement si l'arrondi n'est pas nul (pas de « −0 % »).
+  const fmtPct0 = (v) => {
+    if (v == null) return "n.d.";
+    const r = Math.round(v * 100);
+    return (r > 0 ? "+" : r < 0 ? "−" : "") + intFmt.format(Math.abs(r)) + NNBSP + "%";
+  };
   const fmtDec = (v) => (v == null ? "n.d." : v >= 100 ? intFmt.format(v) : decFmt.format(v));
   // Seuil « stable » unique, fourni par le serveur (metrics.STABLE_THRESHOLD) :
   // flèches, synthèse et classe neutre de la carte utilisent la même valeur.
@@ -36,10 +41,10 @@
   // Comptes | Messages | Intensité, chacun en Évolution | Volume. Pour l'intensité (un taux),
   // le bouton « Volume » s'appelle « Niveau ».
   const FAMILY = {
-    users: { volume: "new_users", change: "new_users_change_pct", noun: "nouveaux comptes", title: "Nouveaux comptes" },
-    messages: { volume: "messages", change: "messages_change_pct", noun: "messages", title: "Messages envoyés" },
+    users: { volume: "new_users", change: "new_users_change_pct", base: "new_users", noun: "nouveaux comptes", title: "Nouveaux comptes" },
+    messages: { volume: "messages", change: "messages_change_pct", base: "messages", noun: "messages", title: "Messages envoyés" },
     // Intensité : bornes fixes, lisibles et stables d'un jour à l'autre.
-    intensity: { volume: "activity_per_100_accounts", change: "activity_change_pct", noun: "messages / 100 comptes",
+    intensity: { volume: "activity_per_100_accounts", change: "activity_change_pct", base: "messages", noun: "messages / 100 comptes",
       title: "Messages / 100 comptes", breaks: [100, 150, 200] },
   };
   const fam = () => FAMILY[state.mapFamily];
@@ -107,7 +112,7 @@
     let items;
     if (!isSequential()) {
       items = DIVERGING.map((b, i) => `<span class="item" data-cls="${i}">${sw(b.color)}${b.label}</span>`);
-      el.innerHTML = `<span class="title">Évolution vs 7 jours précédents</span>${items.join("")}`;
+      el.innerHTML = `<span class="title">vs 7 j préc.</span>${items.join("")}`;
     } else {
       // Classes en intervalles semi-ouverts : « < 120 », « 120–150 », …, « ≥ 170 ».
       if (!locations.some((l) => l[currentMetric()] != null)) { el.innerHTML = ""; return; }
@@ -119,7 +124,7 @@
           : `${fmtInt(breaks[i - 1])}–${fmtInt(breaks[i])}`;
         return `<span class="item" data-cls="${i}">${sw(seqColor(i, n))}${label}</span>`;
       });
-      el.innerHTML = `<span class="title">${f.title}, 7 derniers jours</span>${items.join("")}`;
+      el.innerHTML = `<span class="title">${f.title} · 7 j</span>${items.join("")}`;
     }
   }
 
@@ -132,41 +137,59 @@
     return `<span class="change ${t}"><span aria-hidden="true">${ARROWS[t]}</span> ${fmtPct0(pct)}</span>`;
   }
 
+  // Niveau calculé côté serveur : « strong » (à investiguer) ou « watch » (à surveiller).
+  const LEVEL = { strong: "À investiguer", watch: "À surveiller" };
+  /** Pourcentage coloré sans flèche (lignes à deux valeurs : la couleur porte le sens). */
+  const plainPct = (pct) => `<span class="change ${trend(pct)}">${fmtPct0(pct)}</span>`;
+
   /** Phrase complète d'un signal (encadré du panneau académie). */
   function signalSentence(s) {
-    if (s.kind === "divergence") {
-      return `comptes ${arrowValue(s.evolution_users)}, messages ${arrowValue(s.evolution_messages)} (sens opposés)`;
+    if (s.kind === "activation") {
+      return `${LEVEL[s.level]} : l’usage ne suit pas (nouveaux comptes ${plainPct(s.evolution_users)}, intensité ${plainPct(s.evolution_intensity)})`;
     }
-    const noun = s.metric === "new_users" ? "nouveaux comptes" : "messages";
-    return `${noun} ${arrowValue(s.evolution)} en 7 jours (moyenne nat. ${fmtPct0(s.national)})`;
+    return `${LEVEL[s.level]} : nouveaux comptes ${arrowValue(s.evolution)} en 7 jours (France ${fmtPct0(s.national)})`;
   }
 
-  // Un bloc par mesure ; le repère « France » n'apparaît qu'une fois, dans l'en-tête du bloc.
+  // Trois groupes, dans l'ordre des actions 01 / 02 / 03. Le sens de l'écart (`kind`) et le niveau
+  // (`level`) viennent du serveur. Les signaux forts sont visibles ; les « à surveiller » sont repliés.
   const SIGNAL_BLOCKS = [
-    { key: "new_users", title: "Nouveaux comptes", match: (s) => s.kind !== "divergence" && s.metric === "new_users" },
-    { key: "messages", title: "Messages", match: (s) => s.kind !== "divergence" && s.metric === "messages" },
-    { key: "divergence", title: "Comptes et messages en sens inverse", match: (s) => s.kind === "divergence" },
+    { key: "accel", title: "En accélération", match: (s) => s.kind === "ecart_superieur" },
+    { key: "slow", title: "En ralentissement", match: (s) => s.kind === "ecart_inferieur" },
+    { key: "usage", title: "L’usage ne suit pas", match: (s) => s.kind === "activation" },
   ];
+
+  /** Valeur d'une ligne de signal et son infobulle. */
+  function signalRow(s) {
+    if (s.kind === "activation") {
+      return { html: `<span class="sig-div">comptes ${plainPct(s.evolution_users)} · intensité ${plainPct(s.evolution_intensity)}</span>`,
+        title: "Nouveaux comptes en hausse, intensité stable ou en baisse" };
+    }
+    return { html: arrowValue(s.evolution), title: `France : ${fmtPct0(s.national)}` };
+  }
+
+  function signalItem(r) {
+    const row = signalRow(r.s);
+    return `<li><button type="button" class="sig-row ${r.s.level}" data-id="${r.id}" title="${escapeHtml(row.title)}">` +
+      `<span class="sig-name">${escapeHtml(r.name)}</span>${row.html}<span class="chev" aria-hidden="true">›</span></button></li>`;
+  }
 
   function renderSignals(signals) {
     const box = document.getElementById("signals");
     if (!signals.length) {
-      box.innerHTML = `<p class="signals-empty">Aucune académie ne se démarque cette semaine.</p>`;
+      box.innerHTML = `<p class="signals-empty">Aucun écart marqué cette semaine.</p>`;
       return;
     }
     const rows = signals.flatMap((g) => g.signals.map((s) => ({ id: g.id, name: g.name, s })));
     box.innerHTML = SIGNAL_BLOCKS.map((blk) => {
       const items = rows.filter((r) => blk.match(r.s)).sort((a, b) => b.s.severity - a.s.severity);
       if (!items.length) return "";
-      const france = blk.key === "divergence" ? "" :
-        `<span class="sig-france">Moyenne nat. : ${fmtPct0(items[0].s.national)}</span>`;
-      return `<div class="sig-head"><span>${blk.title}</span>${france}</div><ul class="signals">` + items.map((r) => {
-        const value = r.s.kind === "divergence"
-          ? `<span class="sig-div">comptes ${arrowValue(r.s.evolution_users)} · messages ${arrowValue(r.s.evolution_messages)}</span>`
-          : arrowValue(r.s.evolution);
-        return `<li><button type="button" class="sig-row" data-id="${r.id}"><span class="sig-name">${escapeHtml(r.name)}</span>` +
-          `${value}<span class="chev" aria-hidden="true">›</span></button></li>`;
-      }).join("") + "</ul>";
+      const strong = items.filter((r) => r.s.level === "strong"), watch = items.filter((r) => r.s.level !== "strong");
+      const list = strong.length ? `<ul class="signals">${strong.map(signalItem).join("")}</ul>`
+        : `<p class="signals-none">Aucun signal fort.</p>`;
+      const more = watch.length ? `<details class="sig-more"><summary>+ ${watch.length} à surveiller</summary>` +
+        `<ul class="signals">${watch.map(signalItem).join("")}</ul></details>` : "";
+      // Pas de rappel « France » en tête : le KPI du haut le donne, et l'infobulle de chaque ligne aussi.
+      return `<div class="sig-head"><span>${blk.title}</span></div>${list}${more}`;
     }).join("");
   }
 
@@ -187,15 +210,20 @@
     const note = document.getElementById("location-signal-note");
     const signals = d.signals || [];
     note.hidden = !signals.length;
-    note.innerHTML = signals.length ? `Se démarque : ${signals.map(signalSentence).join(" ; ")}` : "";
+    note.innerHTML = signals.length ? `Signal : ${signals.map(signalSentence).join(" ; ")}` : "";
     const set = (key, html) => { document.querySelector(`#panel-location [data-stat="${key}"]`).innerHTML = html; };
-    set("new_users", `${fmtInt(k.new_users)} ${changeHtml(k.new_users_change_pct)}`);
-    set("new_users_context", `moyenne nat. ${fmtPct(nat.new_users_change_pct)}`);
-    set("messages", `${fmtInt(k.messages)} ${changeHtml(k.messages_change_pct)}`);
-    set("messages_context", `moyenne nat. ${fmtPct(nat.messages_change_pct)}`);
-    set("cumulative_users", fmtInt(k.cumulative_users));
+    // Même ligne de variation que les cartes nationales : % coloré, puis la référence nationale,
+    // ou « volume insuffisant » quand la base de la semaine précédente est trop faible (calculé côté serveur).
+    const low = d.low_volume || {};
+    const change = (pct, natPct, isLow) => `${changeHtml(pct)} <span class="metric-ref">` +
+      (isLow ? "volume insuffisant" : `moyenne nat. ${fmtPct(natPct)}`) + "</span>";
+    set("new_users", fmtInt(k.new_users));
+    set("new_users_change", change(k.new_users_change_pct, nat.new_users_change_pct, low.new_users));
+    set("messages", fmtInt(k.messages));
+    set("messages_change", change(k.messages_change_pct, nat.messages_change_pct, low.messages));
     set("activity_per_100_accounts", fmtDec(k.activity_per_100_accounts));
-    set("activity_context", `moyenne nat. ${fmtDec(nat.activity_per_100_accounts)}`);
+    set("activity_change", change(k.activity_change_pct, nat.activity_change_pct, low.messages));
+    set("cumulative_users", fmtInt(k.cumulative_users));
   }
 
   function showNationalPanel() {
@@ -214,8 +242,14 @@
     { key: "messages", label: "Messages envoyés", color: "#1baf7a" },
   ];
 
-  // Une seule annotation : la rupture majeure du calendrier scolaire.
-  const ANNOTATIONS = [{ from: "2026-07-04", to: "2026-08-31", label: "Vacances d'été" }];
+  // Calendrier scolaire (toutes zones) et jours fériés : ils expliquent des variations temporaires.
+  // Bornes = dates d'activité ; les fins de fenêtre de 7 jours y tombant sont grisées.
+  const ANNOTATIONS = [
+    { from: "2026-07-04", to: "2026-08-31", label: "Vacances d'été" },
+    { from: "2026-10-17", to: "2026-11-01", label: "Toussaint" },
+    { from: "2026-11-11", to: "2026-11-11", label: "11 nov." },
+    { from: "2026-12-19", to: "2027-01-03", label: "Noël" },
+  ];
 
   // Repère « Moyenne » sur la ligne 100 et bande des vacances d'été (plugin local, sans dépendance).
   const referencePlugin = {
@@ -228,11 +262,13 @@
         const i0 = labels.findIndex((d) => d >= n.from);
         const i1 = labels.findLastIndex((d) => d <= n.to);
         if (i0 < 0 || i1 < i0) return;
-        const left = x.getPixelForValue(i0), right = x.getPixelForValue(i1);
+        // Un jour isolé (jour férié) reste visible : largeur minimale de 3 px.
+        const left = x.getPixelForValue(i0), right = Math.max(x.getPixelForValue(i1), left + 3);
         ctx.fillStyle = "rgba(111,110,105,.07)";
         ctx.fillRect(left, a.top, right - left, a.bottom - a.top);
+        if (right - left < 40) return;  // pas d'étiquette sur une bande trop étroite
         ctx.fillStyle = "#6f6e69";
-        ctx.font = "11px system-ui, sans-serif";
+        ctx.font = "12px system-ui, sans-serif";
         ctx.textAlign = "center";
         ctx.fillText(n.label, (left + right) / 2, a.top + 12);
       });
@@ -246,7 +282,7 @@
         ctx.lineTo(a.right, y100);
         ctx.stroke();
         ctx.fillStyle = "#52514e";
-        ctx.font = "600 11px system-ui, sans-serif";
+        ctx.font = "600 12px system-ui, sans-serif";
         ctx.textAlign = "right";
         ctx.fillText("Moyenne", a.right - 4, y100 + 14);
       }
@@ -316,7 +352,7 @@
               callback(v) { return new Date(this.getLabelForValue(v)).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" }); } },
           },
           y: { beginAtZero: true, grid: { color: "#eeeeea" }, border: { display: false },
-            title: { display: true, text: "Indice", color: "#6f6e69", font: { size: 11 } },
+            title: { display: true, text: "Indice", color: "#6f6e69", font: { size: 12 } },
             ticks: { color: "#6f6e69", maxTicksLimit: 6, callback: (v) => fmtInt(v) } },
         },
       },
@@ -330,7 +366,9 @@
     state.scope = "national";
     showNationalPanel();
     document.getElementById("chart-scope").textContent = "France entière";
-    state.chartData = await getJSON(`${URLS.timeseries}?scope=national`);
+    const chart = await getJSON(`${URLS.timeseries}?scope=national`);
+    if (state.scope !== "national") return;  // une académie a été choisie entre-temps
+    state.chartData = chart;
     renderChart();
     highlightSelection();
   }
@@ -338,6 +376,7 @@
   async function showLocation(id) {
     state.scope = String(id);
     const d = await getJSON(`${URLS.location}${id}/`);
+    if (state.scope !== String(id)) return;  // réponse arrivée après une autre sélection
     renderLocationPanel(d);
     document.getElementById("chart-scope").textContent = d.full_name;
     state.chartData = d.chart;
@@ -365,7 +404,8 @@
   function tooltipHtml(l) {
     const f = fam();
     const name = `<strong>${escapeHtml(l.full_name)}</strong><br>`;
-    return `${name}${fmtInt(l[f.volume])} ${f.noun} · ${fmtPct(l[f.change])} vs 7 j préc.`;
+    const low = l.low_volume && l.low_volume[f.base] ? " · volume insuffisant" : "";
+    return `${name}${fmtInt(l[f.volume])} ${f.noun} · ${fmtPct(l[f.change])} vs 7 j préc.${low}`;
   }
 
   function baseStyle(l, breaks) {
@@ -431,7 +471,11 @@
           L.DomEvent.stopPropagation(e);  // ne pas déclencher le clic « hors région » de la carte
           showLocation(f.id);
         });
-        layer.on("mouseover", () => { if (String(f.id) !== state.scope) layer.setStyle({ weight: 2.5, color: "#52514e" }); });
+        // Survol : contour au premier plan, sinon les bordures blanches des voisines le recouvrent.
+        layer.on("mouseover", () => {
+          if (String(f.id) !== state.scope) layer.setStyle({ weight: 2.5, color: "#161616" });
+          layer.bringToFront();
+        });
         layer.on("mouseout", () => highlightSelection());
       },
     }).addTo(map);
@@ -464,6 +508,11 @@
     if (layer) { layer.setStyle({ weight: 2.5, color: "#161616" }); layer.bringToFront(); }
   });
   signalsBox.addEventListener("mouseout", (e) => { if (e.target.closest("button[data-id]")) highlightSelection(); });
+  // Académies listées sous une recommandation : ouvre le détail et remonte au diagnostic territorial.
+  document.querySelectorAll("[data-academy]").forEach((b) => b.addEventListener("click", () => {
+    showLocation(b.dataset.academy);
+    document.getElementById("diagnostic-title").scrollIntoView({ behavior: "smooth", block: "start" });
+  }));
   document.getElementById("academy-select").addEventListener("change", (e) => { if (e.target.value) showLocation(e.target.value); });
   document.getElementById("back-national").addEventListener("click", showNational);
 
@@ -519,6 +568,7 @@
   const params = new URLSearchParams(window.location.search);
   if (params.get("vue") === "intensite") setMapFamily("intensity");  // lien direct vers la vue Intensité
   const initial = params.get("academie");
-  (initial ? showLocation(initial) : showNational())
+  // Académie inconnue dans l'URL : retour à la France entière.
+  (initial ? showLocation(initial).catch(showNational) : showNational())
     .catch(() => { document.getElementById("chart-scope").textContent = "Données indisponibles"; });
 })();

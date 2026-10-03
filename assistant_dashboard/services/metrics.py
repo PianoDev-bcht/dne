@@ -19,30 +19,40 @@ WINDOW_DAYS = 7
 # flèches, phrase de synthèse et classe neutre de la carte.
 STABLE_THRESHOLD = 0.05
 
-# Signaux à examiner. Même référence que tous les autres chiffres (7 derniers
+# Signaux territoriaux. Même référence que tous les autres chiffres (7 derniers
 # jours vs 7 précédents), comparée à la tendance nationale, sur des volumes
-# suffisants. Calibrés sur les données réelles : 4 académies sur 32 au 01/10/2026.
-SIGNAL_MIN_BASE = {"new_users": 30, "messages": 400}  # volume minimal la semaine précédente
-SIGNAL_MIN_GAP = 0.30  # écart à la tendance nationale, en points d'évolution
-DIVERGENCE_MIN = 0.15  # comptes et messages en sens opposés d'au moins 15 %
+# suffisants. Deux niveaux : on repère tôt (à surveiller), on ne recommande
+# d'agir que sur un écart net (à investiguer).
+# Volume minimal sur la plus grande des deux semaines comparées : en dessous de
+# 50 comptes, le hasard seul fait varier la semaine de plus de ±20 points.
+SIGNAL_MIN_BASE = {"new_users": 50, "messages": 400}
+SIGNAL_WATCH_GAP = 0.15  # écart à la tendance nationale, en points d'évolution : à surveiller
+SIGNAL_MIN_GAP = 0.30    # à investiguer (signal fort)
 
 
-def build_daily_series(points):
+def build_daily_series(points, end=None):
     """Construit une série quotidienne continue pour un domaine.
 
     `points` : itérable de (date, cumulative_users, cumulative_messages).
     Les jours sans donnée reprennent le dernier cumul connu (`is_gap=True`) :
     leur flux vaut 0 et le rattrapage tombe le jour où la donnée réapparaît.
     Le premier jour n'a pas de flux calculable (None).
+    `end` : prolonge la série jusqu'à cette date (domaine absent des derniers
+    snapshots), pour que son cumul reste compté dans les agrégats. Ces jours
+    ne sont pas marqués `is_gap` : un domaine retiré du fichier ne doit pas
+    interrompre indéfiniment les séries agrégées (l'absence est signalée par
+    les contrôles qualité).
     """
     known = {d: (u, m) for d, u, m in points}
     if not known:
         return []
-    day, last_day = min(known), max(known)
+    day, last_known = min(known), max(known)
+    last_day = max(last_known, end) if end else last_known
     series, previous = [], None
     while day <= last_day:
-        is_gap = day not in known
-        users, messages = known[day] if not is_gap else previous[:2]
+        missing = day not in known
+        is_gap = missing and day < last_known
+        users, messages = known[day] if not missing else previous[:2]
         if previous is None:
             new_users = daily_messages = None
         else:
@@ -67,6 +77,9 @@ def aggregate_series(all_series):
 
     Un domaine n'est compté qu'à partir de sa première date : son premier
     cumul n'est pas compté comme flux (pas de point de référence).
+    Les flux négatifs (baisse de cumul = anomalie) sont ramenés à 0 domaine
+    par domaine, comme dans `window_total` : la somme des parties reste égale
+    au total.
     """
     by_date = {}
     for series in all_series:
@@ -79,8 +92,8 @@ def aggregate_series(all_series):
             agg["cumulative_users"] += p["cumulative_users"]
             agg["cumulative_messages"] += p["cumulative_messages"]
             if p["new_users"] is not None:
-                agg["new_users"] += p["new_users"]
-                agg["daily_messages"] += p["daily_messages"]
+                agg["new_users"] += max(p["new_users"], 0)
+                agg["daily_messages"] += max(p["daily_messages"], 0)
                 agg["_has_flow"] = True
             agg["is_gap"] |= p["is_gap"]
             agg["is_decrease"] |= p["is_decrease"]
@@ -152,7 +165,7 @@ def compute_kpis(series, days=WINDOW_DAYS):
     """KPI rolling sur les `days` derniers jours disponibles vs les `days` précédents."""
     if not series:
         return {
-            "end_date": None, "cumulative_users": None, "cumulative_messages": None,
+            "end_date": None, "start_date": None, "cumulative_users": None, "cumulative_messages": None,
             "new_users": None, "previous_new_users": None, "new_users_change_abs": None,
             "new_users_change_pct": None, "messages": None, "previous_messages": None,
             "messages_change_abs": None, "messages_change_pct": None,
@@ -209,41 +222,48 @@ def trend(value, threshold=STABLE_THRESHOLD):
     return "up" if value > 0 else "down"
 
 
+def has_min_volume(kpis, metric):
+    """Vrai si l'une des deux semaines comparées atteint SIGNAL_MIN_BASE pour cette mesure."""
+    weeks = (kpis.get(metric), kpis.get(f"previous_{metric}"))
+    return max((w or 0) for w in weeks) >= SIGNAL_MIN_BASE[metric]
+
+
 def detect_signals(location_kpis, national_kpis):
     """Signaux à examiner pour une académie (liste vide si rien de notable).
 
     Même référence que les KPI et la carte : 7 derniers jours vs 7 précédents.
-    - écart : l'évolution de l'académie s'écarte d'au moins SIGNAL_MIN_GAP de
-      l'évolution nationale (ce qui est commun à tout le territoire s'annule) ;
-    - divergence : comptes et messages évoluent nettement en sens opposés.
-    Les volumes trop faibles la semaine précédente sont ignorés.
+    - écart de diffusion : l'évolution des nouveaux comptes de l'académie s'écarte
+      de l'évolution nationale d'au moins SIGNAL_WATCH_GAP (« watch ») ou
+      SIGNAL_MIN_GAP (« strong ») ; ce qui est commun à tout le territoire s'annule ;
+    - activation (l'usage ne suit pas) : nouveaux comptes en hausse et intensité
+      stable (« watch ») ou en baisse (« strong ») ; même règle qu'au niveau national.
+    L'activité (messages) n'est pas un signal en soi : elle sert de contexte et
+    de garde-fou de volume pour l'intensité.
+    Les volumes trop faibles (voir `has_min_volume`) sont ignorés.
     """
-    previous_key = {"new_users": "previous_new_users", "messages": "previous_messages"}
-    signals, usable = [], {}
-    for metric in ("new_users", "messages"):
-        evolution = location_kpis.get(f"{metric}_change_pct")
-        base = location_kpis.get(previous_key[metric])
-        if evolution is None or base is None or base < SIGNAL_MIN_BASE[metric]:
-            continue
-        usable[metric] = evolution
-        national = national_kpis.get(f"{metric}_change_pct")
-        if national is None:
-            continue
+    signals = []
+    evolution = location_kpis.get("new_users_change_pct")
+    national = national_kpis.get("new_users_change_pct")
+    has_users = evolution is not None and has_min_volume(location_kpis, "new_users")
+    if has_users and national is not None:
         gap = evolution - national
-        if abs(gap) >= SIGNAL_MIN_GAP:
+        if abs(gap) >= SIGNAL_WATCH_GAP:
             signals.append({
                 "kind": "ecart_superieur" if gap > 0 else "ecart_inferieur",
-                "metric": metric,
+                "metric": "new_users",
+                "level": "strong" if abs(gap) >= SIGNAL_MIN_GAP else "watch",
                 "evolution": evolution,
                 "national": national,
                 "gap": gap,
                 "severity": abs(gap),
             })
-    if len(usable) == 2:
-        u, m = usable["new_users"], usable["messages"]
-        if (u >= DIVERGENCE_MIN and m <= -DIVERGENCE_MIN) or (u <= -DIVERGENCE_MIN and m >= DIVERGENCE_MIN):
-            signals.append({
-                "kind": "divergence", "metric": "both", "evolution_users": u, "evolution_messages": m,
-                "severity": min(abs(u), abs(m)),
-            })
-    return sorted(signals, key=lambda s: -s["severity"])
+    intensity = location_kpis.get("activity_change_pct")
+    if has_users and has_min_volume(location_kpis, "messages") and intensity is not None \
+            and trend(evolution) == "up" and trend(intensity) != "up":
+        signals.append({
+            "kind": "activation", "metric": "both",
+            "level": "strong" if trend(intensity) == "down" else "watch",
+            "evolution_users": evolution, "evolution_intensity": intensity,
+            "severity": evolution - intensity,
+        })
+    return sorted(signals, key=lambda s: (s["level"] != "strong", -s["severity"]))

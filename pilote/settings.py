@@ -13,6 +13,8 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import os
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -20,15 +22,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
+ON_RAILWAY = 'RAILWAY_ENVIRONMENT_NAME' in os.environ
+
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get(
-    'DJANGO_SECRET_KEY',
-    'django-insecure--lvum)3axwa8)m#i5lhharpk9&7s0ypz*4ehogaqg!pc+4nxyj',
-)
+# La clé de développement ne sert qu'en local : en production, DJANGO_SECRET_KEY est obligatoire.
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
+if not SECRET_KEY:
+    if ON_RAILWAY:
+        raise ImproperlyConfigured('DJANGO_SECRET_KEY doit être définie en production.')
+    SECRET_KEY = 'django-insecure--lvum)3axwa8)m#i5lhharpk9&7s0ypz*4ehogaqg!pc+4nxyj'
 
 # SECURITY WARNING: don't run with debug turned on in production!
 # Désactivé par défaut sur Railway ; DJANGO_DEBUG=1 pour forcer.
-ON_RAILWAY = 'RAILWAY_ENVIRONMENT_NAME' in os.environ
 DEBUG = os.environ.get('DJANGO_DEBUG', '0' if ON_RAILWAY else '1') == '1'
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1']

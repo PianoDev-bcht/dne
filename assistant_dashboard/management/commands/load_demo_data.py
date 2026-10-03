@@ -13,6 +13,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from assistant_dashboard.models import BetaLocation, ImportRun, ProductionObservation
+from assistant_dashboard.services.matching import normalize_name
 
 DEMO_LOCATIONS = [
     # (nom, domaine bêta, lat, lon)
@@ -52,18 +53,18 @@ class Command(BaseCommand):
         for i, (name, email, lat, lon) in enumerate(DEMO_LOCATIONS):
             key = email.replace("-", "_").replace(".", "_")
             loc = BetaLocation.objects.create(
-                name=name, normalized_name=name.lower(), email_domain=email, domain_key=key,
+                name=name, normalized_name=normalize_name(name), email_domain=email, domain_key=key,
                 latitude=lat, longitude=lon)
             for day, u, m in generate_points(seed=i, scale=1 + i / 2):
                 ProductionObservation.objects.create(
-                    date=day, domain=key, normalized_domain=key, label=name, category="academie",
+                    date=day, domain=key, normalized_domain=key, label=name, category=ProductionObservation.CATEGORY_ACADEMIE,
                     cumulative_users=u, cumulative_messages=m, location=loc,
                     source_timestamp=datetime.combine(day, time(3), paris))
                 created += 1
         for key, label in DEMO_NATIONAL:
             for day, u, m in generate_points(seed=99, scale=3):
                 ProductionObservation.objects.create(
-                    date=day, domain=key, normalized_domain=key, label=label, category="national",
+                    date=day, domain=key, normalized_domain=key, label=label, category=ProductionObservation.CATEGORY_NATIONAL,
                     cumulative_users=u, cumulative_messages=m,
                     source_timestamp=datetime.combine(day, time(3), paris))
                 created += 1

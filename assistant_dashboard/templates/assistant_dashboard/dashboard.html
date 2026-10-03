@@ -4,7 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Déploiement de l’Assistant IA</title>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"
+        integrity="sha384-c6Rcwz4e4CITMbu/NBmnNS8yN2sC3cUElMEMfP3vqqKFp7GOYaaBBCqmaWBjmkjb" crossorigin="anonymous">
   <link rel="stylesheet" href="{% static 'assistant_dashboard/dashboard.css' %}">
 </head>
 <body>
@@ -12,19 +13,16 @@
   <div class="wrap header-row">
     <div>
       <h1>Déploiement de l’Assistant IA</h1>
-      <p class="subtitle">Pilotage de la diffusion et de l’activité au ministère de l’Éducation nationale</p>
-      <p class="freshness">
-        {% if freshness.data_date %}
-          Données au <strong>{{ freshness.data_date|date:"d/m/Y" }}</strong>
-        {% else %}
-          Aucune donnée. Lancer <code>python manage.py sync_assistant_data</code>.
-        {% endif %}
+      <p class="subtitle">Pilotage de la diffusion et de l’activité
+        <span class="freshness">· {% if freshness.data_date %}Données au <strong>{{ freshness.data_date|date:"d/m/Y" }}</strong>{% else %}Aucune donnée. Lancer <code>python manage.py sync_assistant_data</code>.{% endif %}</span>
       </p>
     </div>
     <nav class="header-actions" aria-label="Informations complémentaires">
       <button type="button" class="ghost-button" data-open="dialog-method">ⓘ Méthodologie</button>
       {% if freshness.last_run_status == "error" %}
         <button type="button" class="ghost-button status-error" data-open="dialog-quality">Qualité des données · échec de synchronisation</button>
+      {% elif freshness.stale_days > 1 %}
+        <button type="button" class="ghost-button" data-open="dialog-quality">Qualité des données <span class="warn">⚠ dernier fichier il y a {{ freshness.stale_days }} j</span></button>
       {% elif freshness.anomaly_count %}
         <button type="button" class="ghost-button" data-open="dialog-quality">Qualité des données <span class="warn">⚠ {{ freshness.anomaly_count }}</span></button>
       {% else %}
@@ -35,57 +33,67 @@
 </header>
 
 <main class="wrap">
-  {% if kpis.end_date %}
-  <p class="headline" data-headline>
-    <strong>Diffusion {{ kpis.new_users_change_pct|trend_word }}</strong><span class="sep">·</span><strong>Activité {{ kpis.messages_change_pct|trend_word }}</strong>
-    <span class="headline-period">du {{ kpis.start_date|date:"d/m" }} au {{ kpis.end_date|date:"d/m" }}, vs semaine précédente{% if kpis.window_has_gap %} · <span class="gap-flag" title="Période incluant des jours sans donnée publiée">jours manquants</span>{% endif %}</span>
-  </p>
-  {% endif %}
 
-  <section class="kpis" aria-label="Indicateurs nationaux">
-    <article class="kpi kpi-main" data-kpi="new_users">
-      <h2>Nouveaux comptes <span class="kpi-period">· 7 derniers jours</span></h2>
-      <p class="kpi-line">
-        <span class="kpi-value">{{ kpis.new_users|fr_int }}</span>
-        <span class="change {{ kpis.new_users_change_pct|trend }}">
-          <span class="arrow" aria-hidden="true">{{ kpis.new_users_change_pct|trend_arrow }}</span>
-          <span class="pct">{{ kpis.new_users_change_pct|fr_pct }}</span>
-        </span>
-      </p>
-      <p class="kpi-sub">vs 7 jours précédents{% if kpis.new_users_change_abs is not None %} ({{ kpis.new_users_change_abs|fr_signed_int }}){% endif %}</p>
-    </article>
-    <article class="kpi kpi-main" data-kpi="messages">
-      <h2>Messages envoyés <span class="kpi-period">· 7 derniers jours</span></h2>
-      <p class="kpi-line">
-        <span class="kpi-value">{{ kpis.messages|fr_int }}</span>
-        <span class="change {{ kpis.messages_change_pct|trend }}">
-          <span class="arrow" aria-hidden="true">{{ kpis.messages_change_pct|trend_arrow }}</span>
-          <span class="pct">{{ kpis.messages_change_pct|fr_pct }}</span>
-        </span>
-      </p>
-      <p class="kpi-sub">vs 7 jours précédents{% if kpis.messages_change_abs is not None %} ({{ kpis.messages_change_abs|fr_signed_int }}){% endif %}</p>
-    </article>
-    <div class="kpi-secondary">
-      <div data-kpi="cumulative_users">
-        <span class="small-value">{{ kpis.cumulative_users|fr_int }}</span>
-        <span class="small-text">
-          <span class="small-label">Parc total de comptes</span>
-          <span class="small-period">depuis le lancement</span>
-        </span>
+  <section class="step" id="kpi" aria-labelledby="step1-title">
+  <h2 class="step-head" id="step1-title"><span class="step-num" aria-hidden="true">1</span><span class="step-name">Détecter</span><span class="step-sep" aria-hidden="true">·</span>Indicateurs clés</h2>
+  <div class="top-row">
+    <section class="kpi-primary metric" data-kpi="new_users" aria-labelledby="kpi-primary-title">
+      <div class="kpi-primary-head">
+        <h3 class="metric-name" id="kpi-primary-title"><span class="eyebrow">KPI principal</span> · Diffusion
+          <span class="info tip-right" tabindex="0" data-tip="Rythme de diffusion de l’Assistant : comptes créés sur les 7 derniers jours{% if kpis.end_date %} (du {{ kpis.start_date|date:"d/m" }} au {{ kpis.end_date|date:"d/m" }}){% endif %}, comparés aux 7 jours précédents{% if kpis.new_users_change_abs is not None %} ({{ kpis.new_users_change_abs|fr_signed_int }} comptes){% endif %}. Seul indicateur retenu pour le pilotage.">i</span>
+        </h3>
+        {% if kpis.end_date %}
+        <p class="status-pill {{ kpis.new_users_change_pct|trend }}">Diffusion {{ kpis.new_users_change_pct|trend_word }}</p>
+        {% endif %}
       </div>
-      <div data-kpi="activity">
-        <span class="small-value">{{ kpis.activity_per_100_accounts|fr_decimal }}</span>
-        <span class="small-text">
-          <span class="small-label">messages / 100 comptes
-            <span class="info" tabindex="0" data-tip="Messages envoyés en 7 jours pour 100 comptes (parc moyen de la semaine). Ne mesure pas le nombre d’utilisateurs actifs.">i</span>
-          </span>
-          <span class="small-period">7 derniers jours</span>
-        </span>
+      <p class="metric-value">{{ kpis.new_users|fr_int }}</p>
+      <p class="metric-caption">nouveaux comptes en 7 jours</p>
+      <p class="metric-change">
+        <span class="change {{ kpis.new_users_change_pct|trend }}"><span aria-hidden="true">{{ kpis.new_users_change_pct|trend_arrow }}</span> {{ kpis.new_users_change_pct|fr_pct }}</span>
+        <span class="metric-ref">vs 7 jours précédents{% if kpis.window_has_gap %} · <span class="gap-flag" title="Période incluant des jours sans donnée publiée">jours manquants</span>{% endif %}</span>
+      </p>
+    </section>
+
+    <section class="kpis-secondary" aria-labelledby="kpis-secondary-title">
+      <h3 id="kpis-secondary-title" class="overline">Indicateurs secondaires</h3>
+      <div class="kpi-grid">
+        <article class="kpi-small metric" data-kpi="messages">
+          <h3 class="metric-name">Activité
+            <span class="info" tabindex="0" data-tip="Activité totale : messages envoyés en 7 jours par l’ensemble des comptes{% if kpis.messages_change_abs is not None %} ({{ kpis.messages_change_abs|fr_signed_int }} vs 7 jours précédents){% endif %}.">i</span>
+          </h3>
+          <p class="metric-value">{{ kpis.messages|fr_int }}</p>
+          <p class="metric-caption">messages en 7 jours</p>
+          <p class="metric-change">
+            <span class="change {{ kpis.messages_change_pct|trend }}"><span aria-hidden="true">{{ kpis.messages_change_pct|trend_arrow }}</span> {{ kpis.messages_change_pct|fr_pct }}</span>
+            <span class="metric-ref">vs 7 jours précédents</span>
+          </p>
+        </article>
+        <article class="kpi-small metric" data-kpi="activity">
+          <h3 class="metric-name">Intensité
+            <span class="info" tabindex="0" data-tip="Intensité d’usage agrégée : messages envoyés en 7 jours pour 100 comptes (parc moyen de la semaine). Ne mesure pas le nombre d’utilisateurs actifs.">i</span>
+          </h3>
+          <p class="metric-value">{{ kpis.activity_per_100_accounts|fr_decimal }}</p>
+          <p class="metric-caption">messages pour 100 comptes</p>
+          <p class="metric-change">
+            <span class="change {{ kpis.activity_change_pct|trend }}"><span aria-hidden="true">{{ kpis.activity_change_pct|trend_arrow }}</span> {{ kpis.activity_change_pct|fr_pct }}</span>
+            <span class="metric-ref">vs 7 jours précédents</span>
+          </p>
+        </article>
+        <article class="kpi-small metric" data-kpi="cumulative_users">
+          <h3 class="metric-name">Parc total
+            <span class="info" tabindex="0" data-tip="Stock cumulé de comptes, non rapporté à une population cible.">i</span>
+          </h3>
+          <p class="metric-value">{{ kpis.cumulative_users|fr_int }}</p>
+          <p class="metric-caption">comptes depuis le lancement</p>
+        </article>
       </div>
-    </div>
+    </section>
+  </div>
   </section>
 
-  <section class="territory" aria-label="Vue territoriale">
+  <section class="diagnostic" id="diagnostic" aria-labelledby="diagnostic-title">
+    <h2 class="step-head" id="diagnostic-title"><span class="step-num" aria-hidden="true">2</span><span class="step-name">Expliquer</span><span class="step-sep" aria-hidden="true">·</span>Diagnostic territorial</h2>
+  <div class="territory">
     <div class="territory-bar">
       <div class="map-controls">
         <div class="segmented" role="group" aria-label="Indicateur de la carte">
@@ -118,10 +126,9 @@
       <div id="panel-national" class="panel-national">
         <div class="panel-bar">
           <h2 class="panel-title">Académies qui se démarquent
-            <span class="info" tabindex="0" data-tip="Écart d’au moins {{ signal_thresholds.min_gap_pts }} points avec la moyenne nationale, sur au moins {{ signal_thresholds.min_base.new_users }} comptes ou {{ signal_thresholds.min_base.messages }} messages la semaine précédente.">i</span>
+            <span class="info" tabindex="0" data-tip="Diffusion : écart à l’évolution nationale, à surveiller dès {{ signal_thresholds.watch_gap_pts }} points, à investiguer dès {{ signal_thresholds.min_gap_pts }} points. L’usage ne suit pas : comptes en hausse et intensité stable (à surveiller) ou en baisse (à investiguer). Seuls les signaux à investiguer sont affichés ; les autres sont repliés. Volume minimal : {{ signal_thresholds.min_base.new_users }} nouveaux comptes (et {{ signal_thresholds.min_base.messages }} messages pour l’usage) sur l’une des deux semaines. Un signal invite à investiguer, sans jugement de performance.">i</span>
           </h2>
         </div>
-        <p class="panel-sub">Évolution sur 7 jours très différente de la moyenne nationale</p>
         <div class="signals-scroll" id="signals"></div>
         <select id="academy-select" class="pick" aria-label="Choisir une académie">
           <option value="">Choisir une académie</option>
@@ -135,41 +142,72 @@
         </div>
         <p class="signal-note" id="location-signal-note" hidden></p>
         <div class="loc-grid">
-          <div class="loc-kpi">
-            <p class="loc-label">Nouveaux comptes · 7 j</p>
-            <p class="loc-value" data-stat="new_users"></p>
-            <p class="loc-context" data-stat="new_users_context"></p>
+          <div class="metric">
+            <p class="metric-name">Diffusion</p>
+            <p class="metric-value" data-stat="new_users"></p>
+            <p class="metric-caption">nouveaux comptes en 7 jours</p>
+            <p class="metric-change" data-stat="new_users_change"></p>
           </div>
-          <div class="loc-kpi">
-            <p class="loc-label">Messages · 7 j</p>
-            <p class="loc-value" data-stat="messages"></p>
-            <p class="loc-context" data-stat="messages_context"></p>
+          <div class="metric">
+            <p class="metric-name">Activité</p>
+            <p class="metric-value" data-stat="messages"></p>
+            <p class="metric-caption">messages en 7 jours</p>
+            <p class="metric-change" data-stat="messages_change"></p>
           </div>
-          <div class="loc-kpi loc-secondary">
-            <p class="loc-label">Parc total</p>
-            <p class="loc-value small"><span data-stat="cumulative_users"></span> <span class="unit">comptes</span></p>
+          <div class="metric">
+            <p class="metric-name">Intensité</p>
+            <p class="metric-value" data-stat="activity_per_100_accounts"></p>
+            <p class="metric-caption">messages pour 100 comptes</p>
+            <p class="metric-change" data-stat="activity_change"></p>
           </div>
-          <div class="loc-kpi loc-secondary">
-            <p class="loc-label">Messages / 100 comptes</p>
-            <p class="loc-value small"><span data-stat="activity_per_100_accounts"></span> <span class="loc-context inline" data-stat="activity_context"></span></p>
+          <div class="metric">
+            <p class="metric-name">Parc total</p>
+            <p class="metric-value" data-stat="cumulative_users"></p>
+            <p class="metric-caption">comptes depuis le lancement</p>
           </div>
         </div>
       </div>
     </aside>
+  </div>
   </section>
 
-  <section class="trend" aria-labelledby="chart-scope">
+  <section class="recos" id="actions" aria-labelledby="recos-title">
+    <h2 class="step-head" id="recos-title"><span class="step-num" aria-hidden="true">3</span><span class="step-name">Agir</span><span class="step-sep" aria-hidden="true">·</span>Actions recommandées</h2>
+    <div class="reco-grid">
+      <article class="reco{% if not reco.acceleration %} is-empty{% endif %}">
+        <div class="reco-head"><h3><span class="reco-num">01</span> Capitaliser</h3></div>
+        <p class="reco-when">Quand : diffusion à {{ signal_thresholds.min_gap_pts }} points ou plus au-dessus de la tendance nationale</p>
+        {% include "assistant_dashboard/_reco_academies.html" with items=reco.acceleration %}
+        <p class="reco-action"><span aria-hidden="true">→</span> Identifier et partager les leviers locaux efficaces</p>
+      </article>
+      <article class="reco{% if not reco.slowdown %} is-empty{% endif %}">
+        <div class="reco-head"><h3><span class="reco-num">02</span> Corriger</h3></div>
+        <p class="reco-when">Quand : diffusion à {{ signal_thresholds.min_gap_pts }} points ou plus en dessous de la tendance nationale</p>
+        {% include "assistant_dashboard/_reco_academies.html" with items=reco.slowdown %}
+        <p class="reco-action"><span aria-hidden="true">→</span> Diagnostiquer les freins locaux et tester des actions correctives ciblées</p>
+      </article>
+      <article class="reco{% if not reco.activation and not reco.activation_national %} is-empty{% endif %}">
+        <div class="reco-head"><h3><span class="reco-num">03</span> Activer</h3></div>
+        <p class="reco-when">Quand : comptes en hausse, intensité en baisse
+          <span class="info" tabindex="0" data-tip="Des comptes sont créés, mais l’usage ne suit pas : nouveaux comptes en hausse (+{{ signal_thresholds.stable_pct }} % ou plus) et intensité en baisse (−{{ signal_thresholds.stable_pct }} % ou moins), sur 7 jours, avec les volumes minimaux. Intensité seulement stable : à surveiller, dans le diagnostic. Au niveau national : comptes en hausse et intensité stable ou en baisse.">i</span></p>
+        {% include "assistant_dashboard/_reco_academies.html" with items=reco.activation national=reco.activation_national %}
+        <p class="reco-action"><span aria-hidden="true">→</span> Renforcer cas d’usage, démonstrations, formation et accompagnement</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="trend" aria-labelledby="trend-title">
+    <h2 class="section-title" id="trend-title">Évolution historique
+      <span class="info tip-right" tabindex="0" data-tip="12 dernières semaines, en 7 jours glissants. Chaque courbe est indexée sur sa moyenne (100 = moyenne). Interrompue sur les périodes comportant des jours non publiés. Bandes grisées : vacances scolaires et jours fériés.">i</span>
+    </h2>
     <div class="chart-head">
-      <h2 id="chart-scope" class="chart-scope">France entière</h2>
+      <h3 id="chart-scope" class="chart-scope">France entière</h3>
       <div class="chart-legend" aria-hidden="true">
         <span><i class="swatch-line users"></i>Nouveaux comptes (7 j)</span>
         <span><i class="swatch-line messages"></i>Messages envoyés (7 j)</span>
       </div>
     </div>
-    <p class="chart-title">Évolution comparée sur 12 semaines · moyenne = indice 100
-      <span class="info" tabindex="0" data-tip="Données en cumul glissant sur 7 jours. La courbe est interrompue sur les périodes comportant des jours non publiés.">i</span>
-    </p>
-    <div class="chart-box"><canvas id="chart" role="img" aria-label="Évolution sur 7 jours glissants"></canvas></div>
+    <div class="chart-box"><canvas id="chart" role="img" aria-label="Évolution historique sur 7 jours glissants"></canvas></div>
   </section>
 </main>
 
@@ -191,26 +229,92 @@
 
 <dialog id="dialog-method" class="dialog" aria-labelledby="method-title">
   <div class="dialog-head"><h2 id="method-title">Méthodologie</h2><button type="button" class="close" data-close aria-label="Fermer">×</button></div>
-  <h3>7 jours glissants</h3>
-  <p>Chaque chiffre couvre les 7 derniers jours, comparés aux 7 précédents. Cela lisse les week-ends. Les vacances scolaires font baisser l’activité : une baisse n’est pas forcément un mauvais signe.</p>
-  <h3>Calcul</h3>
-  <p>Les données publiées sont des cumuls par domaine de messagerie. Les flux sont les différences d’un jour à l’autre. Les jours non publiés sont rattrapés le jour suivant : les totaux restent justes, mais les fenêtres de 7 jours concernées ne sont pas tracées sur le graphique. L’intensité rapporte les messages de la semaine au parc moyen de cette semaine : un compte créé vendredi ne compte pas comme s’il avait été disponible 7 jours.</p>
-  <h3>Académies qui se démarquent</h3>
-  <p>Tous les pourcentages comparent les 7 derniers jours aux 7 précédents. Une académie est signalée si son évolution s’écarte d’au moins {{ signal_thresholds.min_gap_pts }} points de l’évolution nationale, avec au moins {{ signal_thresholds.min_base.new_users }} comptes ou {{ signal_thresholds.min_base.messages }} messages la semaine précédente. Les effets communs (vacances, rentrée) s’annulent. Un signal invite à investiguer, il ne juge pas une performance. En dessous de ±{{ signal_thresholds.stable_pct }} %, une évolution est considérée stable.</p>
-  <h3>Carte</h3>
-  <p>Un volume élevé reflète d’abord la taille de l’académie : le nombre d’agents éligibles n’est pas connu. La vue Intensité rapporte les messages à la taille du parc : c’est la plus adaptée pour comparer les académies. Seuls les domaines rattachés sans ambiguïté à une académie sont cartographiés.</p>
-  <h3>Limites</h3>
-  <p>Mesuré : comptes créés et messages envoyés. Non mesuré : utilisateurs actifs, rétention, fréquence d’usage, impact sur les pratiques.</p>
+  <p class="method-lead">Dans cette étude, nous pilotons principalement la <strong>diffusion</strong> : le nombre de nouveaux comptes ouverts sur l’Assistant IA en 7 jours. Les autres chiffres servent à la mettre en contexte.</p>
+
+  <h3>1. Les données</h3>
+  <ul>
+    <li>Source : jeux de données publics du ministère (data.education.gouv.fr).</li>
+    <li>Les comptes sont regroupés par <strong>domaine de messagerie</strong>, c’est-à-dire la fin de l’adresse électronique après le @ (par exemple ac-lyon.fr).</li>
+    <li>Pour chaque domaine, le fichier donne le <strong>total depuis le lancement</strong> : nombre de comptes et nombre de messages envoyés à l’Assistant. Le fichier publié un jour donne les totaux à la fin de la veille.</li>
+  </ul>
+
+  <h3>2. Le calcul</h3>
+  <ul>
+    <li>Nouveaux comptes d’un jour = total du jour − total de la veille. Même calcul pour les messages.</li>
+    <li>Diffusion et activité additionnent les <strong>7 derniers jours</strong> publiés, jusqu’à la date affichée en haut de la page, puis se comparent aux 7 jours d’avant. La période avance d’un jour à chaque mise à jour et contient toujours un week-end : deux périodes successives sont comparables.</li>
+    <li>Variation = (cette période − période d’avant) ÷ période d’avant.{% if kpis.new_users_change_pct is not None %} Exemple : ({{ kpis.new_users|fr_int }} − {{ kpis.previous_new_users|fr_int }}) ÷ {{ kpis.previous_new_users|fr_int }} = {{ kpis.new_users_change_pct|fr_pct }}.{% endif %} « n.d. » : non calculable (période d’avant nulle ou historique trop court).</li>
+  </ul>
+
+  <h3>3. Les quatre indicateurs</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Indicateur</th><th>Calcul</th><th>Ce qu’il ne dit pas</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Diffusion</strong> (KPI principal)</td><td>Nouveaux comptes en 7 jours</td><td>Si ces comptes servent</td></tr>
+      <tr><td>Activité</td><td>Messages envoyés à l’Assistant en 7 jours</td><td>Combien de personnes les envoient</td></tr>
+      <tr><td>Intensité</td><td>Messages des 7 jours ÷ nombre total de comptes (moyenne des 7 jours) × 100</td><td>Le nombre d’utilisateurs actifs</td></tr>
+      <tr><td>Parc total</td><td>Total de comptes à la dernière date publiée</td><td>La part des agents équipés : leur nombre n’est pas connu</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>4. Lire une variation</h3>
+  <ul>
+    <li>Variation de moins de {{ signal_thresholds.stable_pct }} %, en plus ou en moins : <strong>stable</strong> (par exemple « Diffusion stable »). À partir de {{ signal_thresholds.stable_pct }} % : en hausse ou en baisse. C’est un seuil d’affichage, choisi pour la lisibilité, pas un test statistique.</li>
+    <li>Les vacances scolaires et les jours fériés font baisser les chiffres : une baisse n’est pas forcément un mauvais signe. Le graphique grise ces périodes.</li>
+    <li>Graphique « Évolution historique » : deux courbes, nouveaux comptes et messages, chaque point étant un total sur 7 jours. Chaque courbe est exprimée par rapport à sa propre moyenne sur les 12 semaines (100 = moyenne) : on compare leurs tendances, pas leurs volumes.</li>
+  </ul>
+
+  <h3>5. La carte de France</h3>
+  <ul>
+    <li>Elle colore chaque académie selon l’onglet choisi (Comptes, Messages ou Intensité), soit en évolution sur 7 jours, soit en volume. En évolution, les classes ±{{ signal_thresholds.stable_pct }} % et ±25 % sont des repères de lecture fixés par convention.</li>
+    <li>Pas de volume minimal sur la carte : un fort pourcentage peut porter sur quelques comptes. Un volume élevé reflète d’abord la taille de l’académie ; pour comparer, utiliser l’évolution ou l’intensité.</li>
+  </ul>
+
+  <h3>6. Académies qui se démarquent</h3>
+  <p>Ces seuils limitent les faux signaux : ils repèrent des situations à examiner, ils ne classent pas les académies.</p>
+  <ul>
+    <li>Chaque académie est comparée à la <strong>tendance nationale</strong> (l’évolution de tous les comptes du pays, y compris hors carte), pas à zéro. Ce qui touche tout le pays en même temps (rentrée, vacances communes, événement national) s’annule ainsi. Les vacances par zone et l’outre-mer peuvent, elles, créer des écarts.</li>
+    <li>L’écart se mesure en <strong>points</strong> de pourcentage : France −1 %, académie +29 % → écart de 30 points.</li>
+    <li>Écart d’au moins {{ signal_thresholds.watch_gap_pts }} points : <strong>à surveiller</strong>. D’au moins {{ signal_thresholds.min_gap_pts }} points : <strong>à investiguer</strong> (signal fort).</li>
+    <li>Volume minimal : au moins {{ signal_thresholds.min_base.new_users }} nouveaux comptes sur l’une des deux semaines comparées (et {{ signal_thresholds.min_base.messages }} messages pour le signal d’usage). En dessous, le hasard seul fait varier le chiffre de plus de 20 points d’une semaine à l’autre ; l’académie n’est pas signalée et son détail indique « volume insuffisant ».</li>
+    <li><strong>En accélération / En ralentissement</strong> : écart sur les nouveaux comptes. Une académie à −10 % quand la France est à −45 % est « en accélération » : elle fait mieux que la tendance, même en baisse.</li>
+    <li><strong>L’usage ne suit pas</strong> : nouveaux comptes en hausse (+{{ signal_thresholds.stable_pct }} % ou plus) et intensité stable (à surveiller) ou en baisse (à investiguer). Cette règle ne compare pas à la France : elle regarde si l’usage accompagne la diffusion dans l’académie.</li>
+    <li>L’activité (messages) n’est pas un signal en soi : elle sert de contexte, sur la carte et dans le détail de chaque académie.</li>
+  </ul>
+
+  <h3>7. Actions recommandées</h3>
+  <p>Seuls les signaux forts déclenchent une action ; les signaux « à surveiller » restent dans le diagnostic.</p>
+  <ul>
+    <li><strong>01 Capitaliser</strong> : diffusion à au moins {{ signal_thresholds.min_gap_pts }} points au-dessus de la tendance nationale.</li>
+    <li><strong>02 Corriger</strong> : diffusion à au moins {{ signal_thresholds.min_gap_pts }} points en dessous.</li>
+    <li><strong>03 Activer</strong> : académies où l’usage ne suit pas, au niveau « à investiguer » (intensité en baisse). Au niveau national, l’action s’affiche aussi quand la diffusion est en hausse et l’intensité stable ou en baisse.</li>
+  </ul>
+
+  <h3>8. Territoires</h3>
+  <ul>
+    <li>Un domaine est rattaché à une académie par son adresse (ac-lyon.fr → Lyon) ou son libellé ; en cas de doute, il n’est pas rattaché. Le rattachement suit l’adresse, pas le lieu de travail.</li>
+    <li>Les domaines nationaux, régionaux ou non rattachés{% if unlocated.share is not None %} ({{ unlocated.share|fr_share }} des comptes){% endif %} comptent dans le total et la référence nationale, mais pas sur la carte. La somme des académies est donc inférieure au total national.</li>
+  </ul>
+
+  <h3>9. Données manquantes</h3>
+  <ul>
+    <li>Jour non publié, ou domaine absent du dernier fichier : ce jour compte zéro, puis le retard est ajouté le jour où la donnée revient. Les totaux restent justes.</li>
+    <li>Le KPI Diffusion, en haut, affiche alors « jours manquants », et le graphique s’interrompt. Les évolutions par académie et les signaux, eux, ne sont pas corrigés : cette semaine-là, un signal peut être faux.</li>
+    <li>Total qui baisse : signalé comme anomalie ; les nouveaux comptes (ou messages) de ce jour comptent zéro dans les sommes sur 7 jours.</li>
+  </ul>
+
+  <h3>10. Limites</h3>
+  <p>Non mesuré : utilisateurs actifs, fréquence d’usage par personne, comptes qui restent utilisés dans la durée, effet sur les pratiques.</p>
 </dialog>
 
 <dialog id="dialog-quality" class="dialog" aria-labelledby="quality-title">
   <div class="dialog-head"><h2 id="quality-title">Qualité des données</h2><button type="button" class="close" data-close aria-label="Fermer">×</button></div>
   {% if freshness.last_sync %}<p class="muted">Dernière synchronisation : {{ freshness.last_sync|date:"d/m/Y H:i" }}</p>{% endif %}
   {% if freshness.last_run_status == "error" %}<p class="status-error-text">Échec de la dernière synchronisation : {{ freshness.last_run_error }}. Données précédentes affichées.</p>{% endif %}
+  {% if freshness.stale_days > 1 %}<p class="status-error-text">Dernier fichier importé il y a {{ freshness.stale_days }} jours : les chiffres affichés ne sont pas à jour. Vérifier la synchronisation quotidienne.</p>{% endif %}
   <h3>Nouvelles anomalies</h3>
   {% for g in freshness.anomalies_new %}
     <h4>{{ g.label }} <span class="count">{{ g.count }}</span></h4>
-    <ul>{% for d in g.details %}<li>{{ d }}</li>{% endfor %}{% if g.count > g.details|length %}<li class="muted">et {{ g.count|add:"-5" }} autre(s)</li>{% endif %}</ul>
+    <ul>{% for d in g.details %}<li>{{ d }}</li>{% endfor %}{% if g.more %}<li class="muted">et {{ g.more }} autre(s)</li>{% endif %}</ul>
   {% empty %}
     <p class="muted">Aucune.</p>
   {% endfor %}
@@ -218,7 +322,7 @@
   <h3>Points connus</h3>
   {% for g in freshness.anomalies_known %}
     <h4>{{ g.label }} <span class="count">{{ g.count }}</span></h4>
-    <ul>{% for d in g.details %}<li>{{ d }}</li>{% endfor %}{% if g.count > g.details|length %}<li class="muted">et {{ g.count|add:"-5" }} autre(s)</li>{% endif %}</ul>
+    <ul>{% for d in g.details %}<li>{{ d }}</li>{% endfor %}{% if g.more %}<li class="muted">et {{ g.more }} autre(s)</li>{% endif %}</ul>
   {% endfor %}
   {% endif %}
 </dialog>
@@ -228,16 +332,17 @@
   <p>Inclus dans le total national, mais non rattachables à une académie.</p>
   <h3>Régions académiques <span class="muted">(plusieurs académies)</span></h3>
   {% include "assistant_dashboard/_offmap_table.html" with rows=unlocated.regional %}
-  <h3>Organisations nationales et opérateurs</h3>
+  <h3>Organisations nationales, opérateurs et domaines non rattachés</h3>
   {% include "assistant_dashboard/_offmap_table.html" with rows=unlocated.national %}
 </dialog>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"
+        integrity="sha384-NElt3Op+9NBMCYaef5HxeJmU4Xeard/Lku8ek6hoPTvYkQPh3zLIrJP7KiRocsxO" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"
+        integrity="sha384-bs/nf9FbdNouRbMiFcrcZfLXYPKiPaGVGplVbv7dLGECccEXDW+S3zjqSKR5ZEaD" crossorigin="anonymous"></script>
 <script>
   window.DASHBOARD_CONFIG = { stable: {{ signal_thresholds.stable_pct }} / 100 };
   window.DASHBOARD_URLS = {
-    summary: "{% url 'assistant_dashboard:api_summary' %}",
     timeseries: "{% url 'assistant_dashboard:api_timeseries' %}",
     locations: "{% url 'assistant_dashboard:api_locations' %}",
     shapes: "{% url 'assistant_dashboard:api_shapes' %}",

@@ -5,6 +5,9 @@ Fait le lien entre les modèles et `metrics` (qui reste sans accès base).
 from collections import defaultdict
 from datetime import timedelta
 
+from django.db.models import Max
+from django.utils import timezone
+
 from ..models import BetaLocation, ImportRun, ProductionObservation
 from . import metrics
 
@@ -13,12 +16,18 @@ DEFAULT_PERIOD = "12s"
 
 
 def _domain_series(queryset):
-    """{domaine: série quotidienne}, indexée par date d'activité (snapshot - 1 j)."""
+    """{domaine: série quotidienne}, indexée par date d'activité (snapshot - 1 j).
+
+    Toutes les séries vont jusqu'au dernier snapshot de la base : un domaine absent
+    des derniers fichiers garde son dernier cumul dans les totaux.
+    """
+    latest = ProductionObservation.objects.aggregate(latest=Max("date"))["latest"]
+    end = latest - timedelta(days=1) if latest else None
     points = defaultdict(list)
     for day, domain, users, messages in queryset.values_list(
             "date", "domain", "cumulative_users", "cumulative_messages"):
         points[domain].append((day - timedelta(days=1), users, messages))
-    return {d: metrics.build_daily_series(p) for d, p in points.items()}
+    return {d: metrics.build_daily_series(p, end=end) for d, p in points.items()}
 
 
 def national_series():
@@ -59,6 +68,9 @@ def freshness():
     return {
         # Le snapshot du jour D couvre l'activité jusqu'à la fin du jour D-1.
         "data_date": latest - timedelta(days=1) if latest else None,
+        # Âge du dernier snapshot, évalué à l'affichage : une synchronisation qui ne
+        # tourne plus ne doit pas laisser un indicateur vert sur des données anciennes.
+        "stale_days": (timezone.localdate() - latest).days if latest else None,
         "last_sync": last_ok.finished_at if last_ok else None,
         "last_run_status": last_run.status if last_run else None,
         "last_run_error": last_run.error_message if last_run else "",
@@ -70,7 +82,7 @@ def freshness():
 
 
 ANOMALY_LABELS = {
-    "date_manquante": "Jours sans données publiées",
+    "date_manquante": "Périodes sans données publiées",
     "domaine_absent": "Domaine absent d'un snapshot",
     "doublon": "Plusieurs snapshots le même jour",
     "baisse_utilisateurs": "Baisse d'un cumul de comptes",
@@ -94,8 +106,14 @@ def group_anomalies(anomalies, max_details=5):
         "type": kind,
         "label": ANOMALY_LABELS.get(kind, kind),
         "count": len(items),
+        "more": max(len(items) - max_details, 0),
         "details": [" : ".join(x for x in (i.get("domain"), i.get("detail")) if x) for i in items[:max_details]],
     } for kind, items in sorted(groups.items())]
+
+
+def low_volume(kpis):
+    """Volume trop faible sur les deux semaines comparées : pourcentage peu fiable, jamais signalé."""
+    return {m: not metrics.has_min_volume(kpis, m) for m in ("new_users", "messages")}
 
 
 def locations_payload():
@@ -119,30 +137,32 @@ def locations_payload():
 
     national = metrics.compute_kpis(metrics.aggregate_series(series_by_domain.values()))
     locations, signals = [], []
-    for loc in BetaLocation.objects.filter(pk__in=by_location.keys()):
+    for loc in BetaLocation.objects.filter(pk__in=by_location.keys()).defer("geo_shape"):
         kpis = metrics.compute_kpis(metrics.aggregate_series(by_location[loc.pk]))
         loc_signals = metrics.detect_signals(kpis, national)
         locations.append({
             "id": loc.pk, "name": loc.display_name, "full_name": loc.full_name,
-            "lat": loc.latitude, "lon": loc.longitude, "has_shape": bool(loc.geo_shape),
+            "lat": loc.latitude, "lon": loc.longitude,
             "signals": loc_signals,
+            "low_volume": low_volume(kpis),
             **serialize_kpis(kpis),
         })
         if loc_signals:
             signals.append({"id": loc.pk, "name": loc.display_name, "full_name": loc.full_name,
+                            "strong": loc_signals[0]["level"] == "strong",
                             "severity": loc_signals[0]["severity"], "signals": loc_signals})
     category_order = {"regional": 0, "national": 1, "non_apparie": 2}
     unlocated.sort(key=lambda u: (category_order.get(u["category"], 9), -(u["cumulative_users"] or 0)))
-    signals.sort(key=lambda s: -s["severity"])
+    signals.sort(key=lambda s: (not s["strong"], -s["severity"]))
     return {
         "locations": locations,
         "unlocated": unlocated,
         "signals": signals,
         "national": {k: national[k] for k in ("new_users_change_pct", "messages_change_pct", "cumulative_users",
-                                            "activity_per_100_accounts")},
+                                            "activity_per_100_accounts", "activity_change_pct")},
         "signal_thresholds": {
             "min_base": metrics.SIGNAL_MIN_BASE, "min_gap": metrics.SIGNAL_MIN_GAP,
-            "divergence": metrics.DIVERGENCE_MIN, "stable": metrics.STABLE_THRESHOLD,
+            "watch_gap": metrics.SIGNAL_WATCH_GAP, "stable": metrics.STABLE_THRESHOLD,
         },
     }
 
@@ -159,7 +179,7 @@ def shapes_payload():
 
 
 def unlocated_summary(payload=None):
-    """Synthèse des domaines hors carte : total, part du parc, 3 principaux, deux groupes."""
+    """Synthèse des domaines hors carte : total, part du parc, deux groupes."""
     payload = payload or locations_payload()
     unlocated = payload["unlocated"]
     by_size = sorted(unlocated, key=lambda u: -(u["cumulative_users"] or 0))
@@ -169,7 +189,6 @@ def unlocated_summary(payload=None):
         "total_users": total,
         "share": total / national_total if national_total else None,
         "count": len(unlocated),
-        "top3": [u for u in by_size if u["category"] == "national" and u["domain"] != "autres"][:3],
         "regional": [u for u in by_size if u["category"] == "regional"],
         "national": [u for u in by_size if u["category"] != "regional"],
     }
