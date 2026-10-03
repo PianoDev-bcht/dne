@@ -1,0 +1,134 @@
+from datetime import date
+from unittest import mock
+
+from django.test import TestCase
+
+from assistant_dashboard.models import BetaLocation, ImportRun, ProductionObservation
+from assistant_dashboard.services import sync
+from assistant_dashboard.services.education_api import BETA_DATASET, CONTOURS_DATASET, EducationAPIError
+
+from .factories import BETA_RECORDS, CONTOUR_RECORDS, LABELS, production_record, production_series
+
+
+def fake_api(production_records):
+    """Remplace les appels HTTP par des données en mémoire."""
+    def fetch_all(dataset, session=None):
+        if dataset == BETA_DATASET:
+            return BETA_RECORDS
+        if dataset == CONTOURS_DATASET:
+            return CONTOUR_RECORDS
+        return production_records
+    return mock.patch.multiple(
+        "assistant_dashboard.services.education_api",
+        fetch_all_records=mock.Mock(side_effect=fetch_all),
+        fetch_field_labels=mock.Mock(return_value=LABELS),
+    )
+
+
+class SyncTests(TestCase):
+    def test_creates_one_observation_per_date_and_domain(self):
+        with fake_api(production_series(3)):
+            run = sync.run_sync()
+        self.assertEqual(BetaLocation.objects.count(), 2)
+        self.assertEqual(ProductionObservation.objects.count(), 3 * 4)
+        self.assertEqual(run.number_of_records_fetched, 3)
+        self.assertEqual(run.number_of_records_created, 12)
+        self.assertIn(run.status, [ImportRun.STATUS_SUCCESS, ImportRun.STATUS_WARNING])
+
+    def test_rerun_is_idempotent(self):
+        with fake_api(production_series(3)):
+            sync.run_sync()
+            run = sync.run_sync()
+        self.assertEqual(ProductionObservation.objects.count(), 12)
+        self.assertEqual(run.number_of_records_created, 0)
+        self.assertEqual(run.number_of_records_updated, 12)
+        self.assertIn("pas_de_nouvelles_donnees", {a["type"] for a in run.anomalies})
+
+    def test_utilisateurs_suffix_and_classification(self):
+        with fake_api(production_series(1)):
+            sync.run_sync()
+        pix = ProductionObservation.objects.get(domain="pix_fr")
+        self.assertEqual(pix.cumulative_users, 2)
+        self.assertEqual(pix.category, "national")
+        self.assertIsNone(pix.location)
+        lyon = ProductionObservation.objects.get(domain="ac_lyon_fr")
+        self.assertEqual(lyon.location.name, "Lyon")
+        self.assertEqual(lyon.label, "Académie de Lyon")
+        self.assertEqual(ProductionObservation.objects.get(domain="region_academique_paca_fr").category, "regional")
+
+    def test_api_unavailable_logs_error_and_keeps_data(self):
+        with fake_api(production_series(2)):
+            sync.run_sync()
+        with mock.patch("assistant_dashboard.services.education_api.fetch_all_records",
+                        side_effect=EducationAPIError("HTTP 503")):
+            run = sync.run_sync()
+        self.assertEqual(run.status, ImportRun.STATUS_ERROR)
+        self.assertIn("503", run.error_message)
+        self.assertEqual(ProductionObservation.objects.count(), 8)
+
+    def test_two_snapshots_same_day_keep_latest(self):
+        day = date(2026, 9, 1)
+        records = [production_record(day, lyon=(10, 100)),
+                   production_record(day, lyon=(12, 120), hour="14:00:00")]
+        with fake_api(records):
+            run = sync.run_sync()
+        self.assertEqual(ProductionObservation.objects.get(domain="ac_lyon_fr").cumulative_users, 12)
+        self.assertIn("doublon", {a["type"] for a in run.anomalies})
+
+    def test_quality_anomalies_are_reported_without_failing(self):
+        records = [
+            production_record(date(2026, 9, 1), lyon=(10, 100)),
+            production_record(date(2026, 9, 2), lyon=(9, 90)),   # baisse
+            production_record(date(2026, 9, 4), lyon=(11, 110)),  # trou le 03/09
+            {"timestamp": None, "cree_le": None, "ac_lyon_fr_users": 1, "ac_lyon_fr_messages": 1},
+        ]
+        missing_domain = production_record(date(2026, 9, 5), lyon=(12, 120))
+        del missing_domain["pix_fr_utilisateurs"], missing_domain["pix_fr_messages"]
+        records.append(missing_domain)
+        with fake_api(records):
+            run = sync.run_sync()
+        types = {a["type"] for a in run.anomalies}
+        self.assertEqual(run.status, ImportRun.STATUS_WARNING)
+        self.assertTrue({"baisse_utilisateurs", "baisse_messages", "date_manquante", "domaine_absent"} <= types)
+
+    def test_new_and_unmatched_domain_flagged(self):
+        with fake_api(production_series(1)):
+            sync.run_sync()
+        record = production_record(date(2026, 9, 2))
+        record.update({"ac_inconnue_fr_users": 1, "ac_inconnue_fr_messages": 2})
+        with fake_api([record]):
+            run = sync.run_sync()
+        types = {(a["type"], a["domain"]) for a in run.anomalies}
+        self.assertIn(("nouveau_domaine", "ac_inconnue_fr"), types)
+        self.assertIn(("domaine_non_apparie", "ac_inconnue_fr"), types)
+        self.assertEqual(ProductionObservation.objects.get(domain="ac_inconnue_fr").category, "non_apparie")
+
+    def test_snapshot_date_is_paris_date(self):
+        day, _ = sync.snapshot_date({"timestamp": "2026-09-01T23:30:00+00:00"})
+        self.assertEqual(day, date(2026, 9, 2))
+        day, _ = sync.snapshot_date({"timestamp": None, "cree_le": "2026-09-01T03:00:00+00:00"})
+        self.assertEqual(day, date(2026, 9, 1))
+
+
+class ContoursAndQualityTests(TestCase):
+    def test_contours_matched_by_name_vice_rectorat_exempt(self):
+        with fake_api(production_series(2)):
+            run = sync.run_sync()
+        lyon = BetaLocation.objects.get(name="Lyon")
+        self.assertEqual(lyon.geo_shape["type"], "Polygon")
+        self.assertEqual(lyon.geo_shape["coordinates"][0][0], [4.12, 45.68])  # arrondi à 2 décimales
+        self.assertIsNone(BetaLocation.objects.get(name="Polynesie").geo_shape)
+        types = {a["type"] for a in run.anomalies}
+        self.assertIn("contour_non_apparie", types)  # « Atlantide » n'existe pas
+        self.assertNotIn("contour_manquant", types)  # la Polynésie n'a pas de contour attendu
+
+    def test_known_anomalies_do_not_raise_status_again(self):
+        records = [production_record(date(2026, 9, 1)), production_record(date(2026, 9, 3))]  # trou le 02/09
+        with fake_api(records), mock.patch("assistant_dashboard.services.sync.timezone.localdate",
+                                           return_value=date(2026, 9, 3)):
+            first = sync.run_sync()
+            second = sync.run_sync()
+        gap = lambda run: [a for a in run.anomalies if a["type"] == "date_manquante"][0]
+        self.assertTrue(gap(first)["new"])
+        self.assertFalse(gap(second)["new"])
+        self.assertEqual(second.status, ImportRun.STATUS_SUCCESS)

@@ -1,0 +1,249 @@
+{% load static dashboard_format %}<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Déploiement de l’Assistant IA</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="{% static 'assistant_dashboard/dashboard.css' %}">
+</head>
+<body>
+<header class="page-header">
+  <div class="wrap header-row">
+    <div>
+      <h1>Déploiement de l’Assistant IA</h1>
+      <p class="subtitle">Pilotage de la diffusion et de l’activité au ministère de l’Éducation nationale</p>
+      <p class="freshness">
+        {% if freshness.data_date %}
+          Données au <strong>{{ freshness.data_date|date:"d/m/Y" }}</strong>
+        {% else %}
+          Aucune donnée. Lancer <code>python manage.py sync_assistant_data</code>.
+        {% endif %}
+      </p>
+    </div>
+    <nav class="header-actions" aria-label="Informations complémentaires">
+      <button type="button" class="ghost-button" data-open="dialog-method">ⓘ Méthodologie</button>
+      {% if freshness.last_run_status == "error" %}
+        <button type="button" class="ghost-button status-error" data-open="dialog-quality">Qualité des données · échec de synchronisation</button>
+      {% elif freshness.anomaly_count %}
+        <button type="button" class="ghost-button" data-open="dialog-quality">Qualité des données <span class="warn">⚠ {{ freshness.anomaly_count }}</span></button>
+      {% else %}
+        <button type="button" class="ghost-button" data-open="dialog-quality">Qualité des données <span class="ok">✓</span></button>
+      {% endif %}
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  {% if kpis.end_date %}
+  <p class="headline" data-headline>
+    <strong>Diffusion {{ kpis.new_users_change_pct|trend_word }}</strong><span class="sep">·</span><strong>Activité {{ kpis.messages_change_pct|trend_word }}</strong>
+    <span class="headline-period">du {{ kpis.start_date|date:"d/m" }} au {{ kpis.end_date|date:"d/m" }}, vs semaine précédente{% if kpis.window_has_gap %} · <span class="gap-flag" title="Période incluant des jours sans donnée publiée">jours manquants</span>{% endif %}</span>
+  </p>
+  {% endif %}
+
+  <section class="kpis" aria-label="Indicateurs nationaux">
+    <article class="kpi kpi-main" data-kpi="new_users">
+      <h2>Nouveaux comptes <span class="kpi-period">· 7 derniers jours</span></h2>
+      <p class="kpi-line">
+        <span class="kpi-value">{{ kpis.new_users|fr_int }}</span>
+        <span class="change {{ kpis.new_users_change_pct|trend }}">
+          <span class="arrow" aria-hidden="true">{{ kpis.new_users_change_pct|trend_arrow }}</span>
+          <span class="pct">{{ kpis.new_users_change_pct|fr_pct }}</span>
+        </span>
+      </p>
+      <p class="kpi-sub">vs 7 jours précédents{% if kpis.new_users_change_abs is not None %} ({{ kpis.new_users_change_abs|fr_signed_int }}){% endif %}</p>
+    </article>
+    <article class="kpi kpi-main" data-kpi="messages">
+      <h2>Messages envoyés <span class="kpi-period">· 7 derniers jours</span></h2>
+      <p class="kpi-line">
+        <span class="kpi-value">{{ kpis.messages|fr_int }}</span>
+        <span class="change {{ kpis.messages_change_pct|trend }}">
+          <span class="arrow" aria-hidden="true">{{ kpis.messages_change_pct|trend_arrow }}</span>
+          <span class="pct">{{ kpis.messages_change_pct|fr_pct }}</span>
+        </span>
+      </p>
+      <p class="kpi-sub">vs 7 jours précédents{% if kpis.messages_change_abs is not None %} ({{ kpis.messages_change_abs|fr_signed_int }}){% endif %}</p>
+    </article>
+    <div class="kpi-secondary">
+      <div data-kpi="cumulative_users">
+        <span class="small-value">{{ kpis.cumulative_users|fr_int }}</span>
+        <span class="small-text">
+          <span class="small-label">Parc total de comptes</span>
+          <span class="small-period">depuis le lancement</span>
+        </span>
+      </div>
+      <div data-kpi="activity">
+        <span class="small-value">{{ kpis.activity_per_100_accounts|fr_decimal }}</span>
+        <span class="small-text">
+          <span class="small-label">messages / 100 comptes
+            <span class="info" tabindex="0" data-tip="Messages envoyés en 7 jours pour 100 comptes (parc moyen de la semaine). Ne mesure pas le nombre d’utilisateurs actifs.">i</span>
+          </span>
+          <span class="small-period">7 derniers jours</span>
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <section class="territory" aria-label="Vue territoriale">
+    <div class="territory-bar">
+      <div class="map-controls">
+        <div class="segmented" role="group" aria-label="Indicateur de la carte">
+          <button type="button" data-map-family="users" aria-pressed="true">Comptes</button>
+          <button type="button" data-map-family="messages" aria-pressed="false">Messages</button>
+          <button type="button" data-map-family="intensity" aria-pressed="false">Intensité</button>
+        </div>
+        <span class="info tip-right" tabindex="0" data-tip="Messages envoyés en 7 jours pour 100 comptes (parc moyen de la semaine). Permet de comparer les académies, quelle que soit leur taille. Ne mesure pas le nombre d’utilisateurs actifs.">i</span>
+        <div class="segmented" role="group" aria-label="Évolution ou volume" id="map-mode-group">
+          <button type="button" data-map-mode="change" aria-pressed="true">Évolution</button>
+          <button type="button" data-map-mode="volume" aria-pressed="false">Volume</button>
+        </div>
+      </div>
+      <div class="legend" id="legend" aria-live="polite"></div>
+    </div>
+    <div class="map-col">
+      <div id="map" aria-label="Carte des académies de France métropolitaine"></div>
+      <div class="map-foot">
+        <div class="overseas"><span class="foot-label">Outre-mer</span><div id="overseas-list" class="chips"></div></div>
+        {% if unlocated.count %}
+        <p class="offmap">
+          {{ unlocated.total_users|fr_int }} comptes hors académies ({{ unlocated.share|fr_share }}), inclus dans le total national ·
+          <button type="button" class="link-button" data-open="dialog-offmap">Détail</button>
+        </p>
+        {% endif %}
+      </div>
+    </div>
+
+    <aside class="panel is-national" id="panel" aria-live="polite">
+      <div id="panel-national" class="panel-national">
+        <div class="panel-bar">
+          <h2 class="panel-title">Académies qui se démarquent
+            <span class="info" tabindex="0" data-tip="Écart d’au moins {{ signal_thresholds.min_gap_pts }} points avec la moyenne nationale, sur au moins {{ signal_thresholds.min_base.new_users }} comptes ou {{ signal_thresholds.min_base.messages }} messages la semaine précédente.">i</span>
+          </h2>
+        </div>
+        <p class="panel-sub">Évolution sur 7 jours très différente de la moyenne nationale</p>
+        <div class="signals-scroll" id="signals"></div>
+        <select id="academy-select" class="pick" aria-label="Choisir une académie">
+          <option value="">Choisir une académie</option>
+          {% for a in academies %}<option value="{{ a.pk }}">{{ a.display_name }}</option>{% endfor %}
+        </select>
+      </div>
+      <div id="panel-location" hidden>
+        <div class="panel-bar">
+          <h2 class="panel-title" id="panel-name"></h2>
+          <button type="button" id="back-national" class="icon-button" title="Revenir à la France entière" aria-label="Revenir à la France entière">✕</button>
+        </div>
+        <p class="signal-note" id="location-signal-note" hidden></p>
+        <div class="loc-grid">
+          <div class="loc-kpi">
+            <p class="loc-label">Nouveaux comptes · 7 j</p>
+            <p class="loc-value" data-stat="new_users"></p>
+            <p class="loc-context" data-stat="new_users_context"></p>
+          </div>
+          <div class="loc-kpi">
+            <p class="loc-label">Messages · 7 j</p>
+            <p class="loc-value" data-stat="messages"></p>
+            <p class="loc-context" data-stat="messages_context"></p>
+          </div>
+          <div class="loc-kpi loc-secondary">
+            <p class="loc-label">Parc total</p>
+            <p class="loc-value small"><span data-stat="cumulative_users"></span> <span class="unit">comptes</span></p>
+          </div>
+          <div class="loc-kpi loc-secondary">
+            <p class="loc-label">Messages / 100 comptes</p>
+            <p class="loc-value small"><span data-stat="activity_per_100_accounts"></span> <span class="loc-context inline" data-stat="activity_context"></span></p>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <section class="trend" aria-labelledby="chart-scope">
+    <div class="chart-head">
+      <h2 id="chart-scope" class="chart-scope">France entière</h2>
+      <div class="chart-legend" aria-hidden="true">
+        <span><i class="swatch-line users"></i>Nouveaux comptes (7 j)</span>
+        <span><i class="swatch-line messages"></i>Messages envoyés (7 j)</span>
+      </div>
+    </div>
+    <p class="chart-title">Évolution comparée sur 12 semaines · moyenne = indice 100
+      <span class="info" tabindex="0" data-tip="Données en cumul glissant sur 7 jours. La courbe est interrompue sur les périodes comportant des jours non publiés.">i</span>
+    </p>
+    <div class="chart-box"><canvas id="chart" role="img" aria-label="Évolution sur 7 jours glissants"></canvas></div>
+  </section>
+</main>
+
+<footer class="page-footer">
+  <div class="wrap footer-row">
+    <p>
+      Sources : <a href="https://data.education.gouv.fr/explore/dataset/fr-en-assistant_ia_deploiement_menjs/" rel="noopener">déploiement</a>,
+      <a href="https://data.education.gouv.fr/explore/dataset/assistant-ia-dinum-deploiement-au-ministere-de-leducation-nationale-en-academie/" rel="noopener">bêta</a>,
+      <a href="https://data.education.gouv.fr/explore/dataset/fr-en-contour-academies-2020/" rel="noopener">contours</a>
+      · data.education.gouv.fr, licence Ouverte · Prototype
+    </p>
+    <p>
+      <button type="button" class="link-button" data-open="dialog-method">Méthodologie</button>
+      <span class="sep">·</span>
+      <button type="button" class="link-button" data-open="dialog-quality">Qualité des données</button>
+    </p>
+  </div>
+</footer>
+
+<dialog id="dialog-method" class="dialog" aria-labelledby="method-title">
+  <div class="dialog-head"><h2 id="method-title">Méthodologie</h2><button type="button" class="close" data-close aria-label="Fermer">×</button></div>
+  <h3>7 jours glissants</h3>
+  <p>Chaque chiffre couvre les 7 derniers jours, comparés aux 7 précédents. Cela lisse les week-ends. Les vacances scolaires font baisser l’activité : une baisse n’est pas forcément un mauvais signe.</p>
+  <h3>Calcul</h3>
+  <p>Les données publiées sont des cumuls par domaine de messagerie. Les flux sont les différences d’un jour à l’autre. Les jours non publiés sont rattrapés le jour suivant : les totaux restent justes, mais les fenêtres de 7 jours concernées ne sont pas tracées sur le graphique. L’intensité rapporte les messages de la semaine au parc moyen de cette semaine : un compte créé vendredi ne compte pas comme s’il avait été disponible 7 jours.</p>
+  <h3>Académies qui se démarquent</h3>
+  <p>Tous les pourcentages comparent les 7 derniers jours aux 7 précédents. Une académie est signalée si son évolution s’écarte d’au moins {{ signal_thresholds.min_gap_pts }} points de l’évolution nationale, avec au moins {{ signal_thresholds.min_base.new_users }} comptes ou {{ signal_thresholds.min_base.messages }} messages la semaine précédente. Les effets communs (vacances, rentrée) s’annulent. Un signal invite à investiguer, il ne juge pas une performance. En dessous de ±{{ signal_thresholds.stable_pct }} %, une évolution est considérée stable.</p>
+  <h3>Carte</h3>
+  <p>Un volume élevé reflète d’abord la taille de l’académie : le nombre d’agents éligibles n’est pas connu. La vue Intensité rapporte les messages à la taille du parc : c’est la plus adaptée pour comparer les académies. Seuls les domaines rattachés sans ambiguïté à une académie sont cartographiés.</p>
+  <h3>Limites</h3>
+  <p>Mesuré : comptes créés et messages envoyés. Non mesuré : utilisateurs actifs, rétention, fréquence d’usage, impact sur les pratiques.</p>
+</dialog>
+
+<dialog id="dialog-quality" class="dialog" aria-labelledby="quality-title">
+  <div class="dialog-head"><h2 id="quality-title">Qualité des données</h2><button type="button" class="close" data-close aria-label="Fermer">×</button></div>
+  {% if freshness.last_sync %}<p class="muted">Dernière synchronisation : {{ freshness.last_sync|date:"d/m/Y H:i" }}</p>{% endif %}
+  {% if freshness.last_run_status == "error" %}<p class="status-error-text">Échec de la dernière synchronisation : {{ freshness.last_run_error }}. Données précédentes affichées.</p>{% endif %}
+  <h3>Nouvelles anomalies</h3>
+  {% for g in freshness.anomalies_new %}
+    <h4>{{ g.label }} <span class="count">{{ g.count }}</span></h4>
+    <ul>{% for d in g.details %}<li>{{ d }}</li>{% endfor %}{% if g.count > g.details|length %}<li class="muted">et {{ g.count|add:"-5" }} autre(s)</li>{% endif %}</ul>
+  {% empty %}
+    <p class="muted">Aucune.</p>
+  {% endfor %}
+  {% if freshness.anomalies_known %}
+  <h3>Points connus</h3>
+  {% for g in freshness.anomalies_known %}
+    <h4>{{ g.label }} <span class="count">{{ g.count }}</span></h4>
+    <ul>{% for d in g.details %}<li>{{ d }}</li>{% endfor %}{% if g.count > g.details|length %}<li class="muted">et {{ g.count|add:"-5" }} autre(s)</li>{% endif %}</ul>
+  {% endfor %}
+  {% endif %}
+</dialog>
+
+<dialog id="dialog-offmap" class="dialog dialog-wide" aria-labelledby="offmap-title">
+  <div class="dialog-head"><h2 id="offmap-title">Comptes hors académies</h2><button type="button" class="close" data-close aria-label="Fermer">×</button></div>
+  <p>Inclus dans le total national, mais non rattachables à une académie.</p>
+  <h3>Régions académiques <span class="muted">(plusieurs académies)</span></h3>
+  {% include "assistant_dashboard/_offmap_table.html" with rows=unlocated.regional %}
+  <h3>Organisations nationales et opérateurs</h3>
+  {% include "assistant_dashboard/_offmap_table.html" with rows=unlocated.national %}
+</dialog>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+  window.DASHBOARD_CONFIG = { stable: {{ signal_thresholds.stable_pct }} / 100 };
+  window.DASHBOARD_URLS = {
+    summary: "{% url 'assistant_dashboard:api_summary' %}",
+    timeseries: "{% url 'assistant_dashboard:api_timeseries' %}",
+    locations: "{% url 'assistant_dashboard:api_locations' %}",
+    shapes: "{% url 'assistant_dashboard:api_shapes' %}",
+    location: "{% url 'assistant_dashboard:api_location' 0 %}".replace(/0\/$/, ""),
+  };
+</script>
+<script src="{% static 'assistant_dashboard/dashboard.js' %}"></script>
+</body>
+</html>

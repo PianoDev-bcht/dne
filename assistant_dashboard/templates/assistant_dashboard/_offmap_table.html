@@ -1,0 +1,12 @@
+{% load dashboard_format %}<div class="table-wrap">
+  <table>
+    <thead><tr><th>Domaine</th><th class="num">Comptes cumulés</th><th class="num">Nouveaux comptes 7 j</th><th class="num">Messages 7 j</th></tr></thead>
+    <tbody>
+      {% for u in rows %}
+        <tr><td>{{ u.label }}</td><td class="num">{{ u.cumulative_users|fr_int }}</td><td class="num">{{ u.new_users|fr_int }}</td><td class="num">{{ u.messages|fr_int }}</td></tr>
+      {% empty %}
+        <tr><td colspan="4" class="muted">Aucun domaine.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
