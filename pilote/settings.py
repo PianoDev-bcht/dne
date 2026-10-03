@@ -87,13 +87,17 @@ WSGI_APPLICATION = 'pilote.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
+# Sur Railway, la base va dans le volume attaché (s'il existe).
+SQLITE_FILE = Path(os.environ.get('SQLITE_PATH') or Path(
+    os.environ.get('RAILWAY_VOLUME_MOUNT_PATH', BASE_DIR)
+) / 'db.sqlite3')
+# Crée le dossier s'il manque, plutôt que d'échouer au démarrage.
+SQLITE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        # Sur Railway, la base va dans le volume attaché (s'il existe).
-        'NAME': os.environ.get('SQLITE_PATH') or Path(
-            os.environ.get('RAILWAY_VOLUME_MOUNT_PATH', BASE_DIR)
-        ) / 'db.sqlite3',
+        'NAME': SQLITE_FILE,
     }
 }
 
