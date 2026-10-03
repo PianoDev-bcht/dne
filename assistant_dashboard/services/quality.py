@@ -7,7 +7,12 @@ ni l'affichage du dashboard.
 from datetime import timedelta
 
 
+MAX_DETAIL = 120  # le détail peut reprendre une valeur de la source : on borne ce qui est stocké et affiché
+
+
 def anomaly(kind, detail, domain="", date=None):
+    if len(detail) > MAX_DETAIL:
+        detail = detail[:MAX_DETAIL - 1] + "…"
     return {"type": kind, "domain": domain, "date": date.isoformat() if date else "", "detail": detail}
 
 
@@ -63,14 +68,3 @@ def check_new_domains(domains, known_domains):
     return [anomaly("nouveau_domaine", "domaine apparu dans les données", d)
             for d in sorted(set(domains) - set(known_domains))]
 
-
-def check_stale_data(latest, today):
-    """Absence de nouvelles données : le dernier snapshot n'est pas celui du jour.
-
-    Le fichier est publié vers 03:00 ; à la synchronisation de 12:00, le
-    snapshot du jour devrait être disponible.
-    """
-    if latest and latest < today:
-        return [anomaly("pas_de_nouvelles_donnees",
-                        f"dernier snapshot publié le {latest:%d/%m/%Y}", date=latest)]
-    return []

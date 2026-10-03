@@ -1,11 +1,22 @@
 from datetime import date, datetime, time, timedelta
+from functools import partial
 from unittest import mock
 
 from django.test import TestCase
 from django.urls import reverse
 
-from assistant_dashboard.models import BetaLocation, ProductionObservation
+from assistant_dashboard.models import BetaLocation, ImportRun, ProductionObservation
+from assistant_dashboard.services import dashboard_data
 from assistant_dashboard.services.sync import PARIS
+
+
+def at(day, hour, minute=0):
+    return datetime(2026, 9, day, hour, minute, tzinfo=PARIS)
+
+
+def frozen(now):
+    """Fige l'horloge de `freshness` (page et API) à `now`."""
+    return mock.patch.object(dashboard_data, "freshness", partial(dashboard_data.freshness, now=now))
 
 
 def seed():
@@ -38,7 +49,7 @@ class DashboardPageTests(TestCase):
         self.assertContains(r, 'class="kpi-primary metric"', count=1)  # un seul KPI piloté : la diffusion
         self.assertContains(r, 'class="kpi-small metric"', count=3)
         self.assertContains(r, "77")  # 7 × (10 + 1) nouveaux comptes, Lyon + Pix
-        self.assertContains(r, "Données au")
+        self.assertContains(r, "Données du")
 
     def test_headline_and_self_explanatory_secondary_kpis(self):
         seed()
@@ -147,14 +158,68 @@ class DashboardPageTests(TestCase):
     def test_stale_data_is_flagged_at_display_time(self):
         seed()  # dernier snapshot : 20/09/2026
         url = reverse("assistant_dashboard:dashboard")
-        with mock.patch("assistant_dashboard.services.dashboard_data.timezone.localdate",
-                        return_value=date(2026, 9, 21)):
+        with frozen(at(21, 3)):
             r = self.client.get(url)
             self.assertEqual(r.context["freshness"]["stale_days"], 1)  # avant la synchronisation du jour
             self.assertNotContains(r, "dernier fichier il y a")
-        with mock.patch("assistant_dashboard.services.dashboard_data.timezone.localdate",
-                        return_value=date(2026, 9, 27)):
+        with frozen(at(27, 12)):
             self.assertContains(self.client.get(url), "dernier fichier il y a 7 j")
+
+    def test_sync_status_line(self):
+        seed()  # dernier snapshot : 20/09/2026, données au 19/09
+        ok = ImportRun.objects.create(status=ImportRun.STATUS_WARNING, anomalies=[
+            {"type": "date_manquante", "domain": "", "date": "", "detail": "trou connu", "new": True}])
+        ImportRun.objects.filter(pk=ok.pk).update(finished_at=at(20, 4, 3))
+        url = reverse("assistant_dashboard:dashboard")
+
+        def page(now):
+            with frozen(now):
+                return self.client.get(url)
+
+        r = page(at(20, 9))
+        self.assertEqual(r.context["freshness"]["sync_state"], "up_to_date")
+        self.assertContains(r, "dernière synchronisation le 20/09 à 04:03")
+        # Le lendemain, avant publication : état normal, sans alerte, avec la prochaine vérification.
+        ImportRun.objects.create(status=ImportRun.STATUS_UNCHANGED)
+        r = page(at(21, 5))
+        self.assertEqual(r.context["freshness"]["sync_state"], "waiting_for_publication")
+        self.assertContains(r, "prochaine vérification prévue à 05:30")
+        self.assertNotContains(r, "pas de fichier")
+        self.assertEqual(r.context["freshness"]["anomaly_count"], 1)  # les anomalies connues restent affichées
+        # Dernier créneau passé sans fichier : la journée sans publication est signalée.
+        r = page(at(21, 12))
+        self.assertEqual(r.context["freshness"]["sync_state"], "no_publication_today")
+        self.assertContains(r, "pas de fichier publié aujourd’hui · prochaine vérification demain à 04:00")
+        self.assertContains(r, "⚠ pas de fichier aujourd’hui")
+
+    def test_error_detail_is_not_published(self):
+        seed()
+        ImportRun.objects.create(status=ImportRun.STATUS_ERROR, finished_at=at(21, 4),
+                                 error_message="OperationalError: /data/db.sqlite3 is locked")
+        with frozen(at(21, 5)):
+            r = self.client.get(reverse("assistant_dashboard:dashboard"))
+            summary = self.client.get(reverse("assistant_dashboard:api_summary"))
+        self.assertEqual(r.context["freshness"]["sync_state"], "error")
+        self.assertContains(r, "source indisponible ou réponse illisible")
+        self.assertContains(r, "échec de synchronisation")
+        for response in (r, summary):
+            self.assertNotContains(response, "OperationalError")
+            self.assertNotContains(response, "db.sqlite3")
+
+    def test_current_data_wins_over_an_older_error(self):
+        seed()
+        ImportRun.objects.create(status=ImportRun.STATUS_ERROR, finished_at=at(20, 4), error_message="HTTP 503")
+        with frozen(at(20, 9)):  # le snapshot du jour est en base
+            r = self.client.get(reverse("assistant_dashboard:dashboard"))
+        self.assertEqual(r.context["freshness"]["sync_state"], "up_to_date")
+        self.assertNotContains(r, "échec de synchronisation")
+
+    def test_sync_in_progress(self):
+        seed()
+        ImportRun.objects.create()  # statut « running », démarré à l'instant
+        r = self.client.get(reverse("assistant_dashboard:dashboard"))
+        self.assertEqual(r.context["freshness"]["sync_state"], "syncing")
+        self.assertContains(r, "synchronisation en cours")
 
     def test_forbidden_wording_absent(self):
         seed()

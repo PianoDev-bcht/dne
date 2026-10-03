@@ -5,11 +5,10 @@ Fait le lien entre les modèles et `metrics` (qui reste sans accès base).
 from collections import defaultdict
 from datetime import timedelta
 
-from django.db.models import Max
 from django.utils import timezone
 
 from ..models import BetaLocation, ImportRun, ProductionObservation
-from . import metrics
+from . import metrics, schedule
 
 PERIODS = {"30j": 30, "12s": 84, "all": None}
 DEFAULT_PERIOD = "12s"
@@ -21,7 +20,7 @@ def _domain_series(queryset):
     Toutes les séries vont jusqu'au dernier snapshot de la base : un domaine absent
     des derniers fichiers garde son dernier cumul dans les totaux.
     """
-    latest = ProductionObservation.objects.aggregate(latest=Max("date"))["latest"]
+    latest = ProductionObservation.latest_date()
     end = latest - timedelta(days=1) if latest else None
     points = defaultdict(list)
     for day, domain, users, messages in queryset.values_list(
@@ -56,12 +55,37 @@ def serialize_kpis(kpis):
     return {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in kpis.items()}
 
 
-def freshness():
-    last_run = ImportRun.objects.exclude(status=ImportRun.STATUS_RUNNING).first()
-    last_ok = ImportRun.objects.filter(
-        status__in=[ImportRun.STATUS_SUCCESS, ImportRun.STATUS_WARNING]).first()
-    latest = ProductionObservation.objects.order_by("-date").values_list("date", flat=True).first()
-    anomalies = last_run.anomalies if last_run else []
+# États de synchronisation affichés (repris tels quels dans dashboard.html et /api/dashboard/summary/).
+SYNC_RUNNING = "syncing"
+SYNC_UP_TO_DATE = "up_to_date"
+SYNC_ERROR = "error"
+SYNC_WAITING = "waiting_for_publication"        # état normal tant que le fichier du jour n'est pas publié
+SYNC_NO_PUBLICATION = "no_publication_today"    # dernier créneau passé sans fichier du jour
+
+
+def freshness(now=None):
+    """Fraîcheur des données, état de la synchronisation et anomalies du dernier import complet."""
+    now = now or timezone.localtime()
+    today = now.date()
+    last_run = ImportRun.objects.exclude(status=ImportRun.STATUS_RUNNING).first()  # dernière tentative
+    last_ok = ImportRun.objects.filter(status__in=ImportRun.COMPLETED).first()
+    latest = ProductionObservation.latest_date()
+    next_check = schedule.next_slot(now)
+    # Un import interrompu reste « running » : au-delà de 10 minutes, il n'est plus considéré en cours.
+    running = ImportRun.objects.filter(
+        status=ImportRun.STATUS_RUNNING, started_at__gte=now - timedelta(minutes=10)).exists()
+    if running:
+        sync_state = SYNC_RUNNING
+    elif latest and latest >= today:
+        sync_state = SYNC_UP_TO_DATE  # prime sur un échec antérieur : les données du jour sont là
+    elif last_run and last_run.status == ImportRun.STATUS_ERROR:
+        sync_state = SYNC_ERROR
+    elif next_check.date() > today:
+        sync_state = SYNC_NO_PUBLICATION
+    else:
+        sync_state = SYNC_WAITING
+    # Une vérification sans nouvelle publication (ou en échec) ne remplace pas les anomalies connues.
+    anomalies = last_ok.anomalies if last_ok else []
     # Les anomalies déjà connues lors de l'import précédent ne relancent pas l'alerte.
     new = [a for a in anomalies if a.get("new", True)]
     known = [a for a in anomalies if not a.get("new", True)]
@@ -70,12 +94,14 @@ def freshness():
         "data_date": latest - timedelta(days=1) if latest else None,
         # Âge du dernier snapshot, évalué à l'affichage : une synchronisation qui ne
         # tourne plus ne doit pas laisser un indicateur vert sur des données anciennes.
-        "stale_days": (timezone.localdate() - latest).days if latest else None,
+        "stale_days": (today - latest).days if latest else None,
         "last_sync": last_ok.finished_at if last_ok else None,
-        "last_run_status": last_run.status if last_run else None,
-        "last_run_error": last_run.error_message if last_run else "",
+        # Le message d'erreur détaillé reste dans ImportRun (admin, logs) : il n'est pas publié.
+        "last_attempt": last_run.finished_at if last_run else None,
+        "sync_state": sync_state,
+        "next_check": next_check,
+        "next_check_tomorrow": next_check.date() > today,
         "anomaly_count": len(new),
-        "anomaly_types": sorted({a["type"] for a in new}),
         "anomalies_new": group_anomalies(new),
         "anomalies_known": group_anomalies(known),
     }
@@ -89,10 +115,11 @@ ANOMALY_LABELS = {
     "baisse_messages": "Baisse d'un cumul de messages",
     "nouveau_domaine": "Nouveau domaine apparu",
     "domaine_non_apparie": "Domaine sans correspondance territoriale",
-    "pas_de_nouvelles_donnees": "Pas de nouveau fichier aujourd'hui",
     "contour_non_apparie": "Contour d'académie sans correspondance",
     "contour_manquant": "Académie sans contour géographique",
     "valeur_manquante": "Valeur manquante",
+    "valeur_invalide": "Valeur invalide",
+    "date_invalide": "Snapshot daté dans le futur",
     "colonne_inconnue": "Colonne non reconnue",
 }
 

@@ -1,17 +1,26 @@
 from datetime import date
 from unittest import mock
 
+from django.core.management import call_command
+from django.core.management.base import CommandError
+
 from django.test import TestCase
 
 from assistant_dashboard.models import BetaLocation, ImportRun, ProductionObservation
-from assistant_dashboard.services import sync
+from assistant_dashboard.services import dashboard_data, education_api, metrics, sync
 from assistant_dashboard.services.education_api import BETA_DATASET, CONTOURS_DATASET, EducationAPIError
 
 from .factories import BETA_RECORDS, CONTOUR_RECORDS, LABELS, production_record, production_series
 
 
-def fake_api(production_records):
-    """Remplace les appels HTTP par des données en mémoire."""
+def fake_api(production_records, latest=None):
+    """Remplace les appels HTTP par des données en mémoire.
+
+    `latest` : horodatage renvoyé par la vérification de publication (défaut : le
+    plus récent des enregistrements).
+    """
+    if latest is None:
+        latest = max((r.get("timestamp") or "" for r in production_records), default=None) or None
     def fetch_all(dataset, session=None):
         if dataset == BETA_DATASET:
             return BETA_RECORDS
@@ -22,6 +31,7 @@ def fake_api(production_records):
         "assistant_dashboard.services.education_api",
         fetch_all_records=mock.Mock(side_effect=fetch_all),
         fetch_field_labels=mock.Mock(return_value=LABELS),
+        fetch_latest_timestamp=mock.Mock(return_value=latest),
     )
 
 
@@ -42,7 +52,16 @@ class SyncTests(TestCase):
         self.assertEqual(ProductionObservation.objects.count(), 12)
         self.assertEqual(run.number_of_records_created, 0)
         self.assertEqual(run.number_of_records_updated, 12)
-        self.assertIn("pas_de_nouvelles_donnees", {a["type"] for a in run.anomalies})
+        self.assertEqual(run.status, ImportRun.STATUS_SUCCESS)  # rien de nouveau : pas d'alerte
+
+    def test_duplicate_synchronization_changes_nothing(self):
+        with fake_api(production_series(2)):
+            sync.run_sync()
+            before = metrics.compute_kpis(dashboard_data.national_series())
+            sync.run_sync()
+            sync.run_sync()
+        self.assertEqual(ProductionObservation.objects.count(), 2 * 4)
+        self.assertEqual(metrics.compute_kpis(dashboard_data.national_series()), before)
 
     def test_utilisateurs_suffix_and_classification(self):
         with fake_api(production_series(1)):
@@ -110,6 +129,117 @@ class SyncTests(TestCase):
         self.assertEqual(day, date(2026, 9, 1))
 
 
+class ScheduledSyncTests(TestCase):
+    """Vérification planifiée : on n'importe que si la source a publié un nouveau snapshot."""
+
+    TODAY = date(2026, 9, 3)
+
+    def setUp(self):
+        with fake_api(production_series(2)):  # snapshots des 01/09 et 02/09
+            sync.run_sync()
+
+    def kpis(self):
+        return metrics.compute_kpis(dashboard_data.national_series())
+
+    def test_new_data_is_ingested(self):
+        with fake_api(production_series(3)):
+            run = sync.run_scheduled_sync(today=self.TODAY)
+        self.assertEqual(run.status, ImportRun.STATUS_SUCCESS)  # données propres : aucune anomalie nouvelle
+        self.assertEqual(run.number_of_records_created, 4)
+        self.assertTrue(ProductionObservation.objects.filter(date=self.TODAY).exists())
+
+    def test_no_new_data_is_a_normal_state(self):
+        before = list(ProductionObservation.objects.values_list("pk", "updated_at"))
+        with fake_api(production_series(2)):
+            run = sync.run_scheduled_sync(today=self.TODAY)
+            education_api.fetch_all_records.assert_not_called()  # rien n'est téléchargé
+        self.assertEqual(run.status, ImportRun.STATUS_UNCHANGED)
+        self.assertEqual(run.error_message, "")
+        self.assertEqual(list(ProductionObservation.objects.values_list("pk", "updated_at")), before)
+
+    def test_no_request_once_todays_snapshot_is_stored(self):
+        runs = ImportRun.objects.count()
+        with fake_api(production_series(2)):
+            self.assertIsNone(sync.run_scheduled_sync(today=date(2026, 9, 2)))
+            education_api.fetch_latest_timestamp.assert_not_called()
+        self.assertEqual(ImportRun.objects.count(), runs)
+
+    def test_source_unavailable_is_logged_and_keeps_data(self):
+        before = self.kpis()
+        with mock.patch("assistant_dashboard.services.education_api.fetch_latest_timestamp",
+                        side_effect=EducationAPIError("HTTP 503")):
+            run = sync.run_scheduled_sync(today=self.TODAY)
+        self.assertEqual(run.status, ImportRun.STATUS_ERROR)
+        self.assertIn("503", run.error_message)
+        self.assertEqual(self.kpis(), before)
+        self.assertEqual(self.client.get("/").status_code, 200)
+
+    def test_malformed_timestamp_is_an_error_and_writes_nothing(self):
+        bad = production_record(self.TODAY)
+        bad["timestamp"] = "pas-une-date"
+        with fake_api(production_series(2) + [bad], latest="2026-09-03T01:00:01+00:00"):
+            run = sync.run_scheduled_sync(today=self.TODAY)
+        self.assertEqual(run.status, ImportRun.STATUS_ERROR)
+        self.assertEqual(ProductionObservation.objects.count(), 2 * 4)
+
+    def test_empty_dataset_is_an_error_and_writes_nothing(self):
+        with fake_api([], latest="2026-09-03T01:00:01+00:00"):
+            run = sync.run_scheduled_sync(today=self.TODAY)
+        self.assertEqual(run.status, ImportRun.STATUS_ERROR)
+        self.assertIn("aucune observation", run.error_message)
+        self.assertEqual(ProductionObservation.objects.count(), 2 * 4)
+
+    def test_non_numeric_value_is_skipped_and_reported(self):
+        bad = production_record(self.TODAY, lyon=("douze", 120))
+        with fake_api(production_series(2) + [bad]):
+            run = sync.run_scheduled_sync(today=self.TODAY)
+        self.assertIn(("valeur_invalide", "ac_lyon_fr"), {(a["type"], a["domain"]) for a in run.anomalies})
+        self.assertFalse(ProductionObservation.objects.filter(date=self.TODAY, domain="ac_lyon_fr").exists())
+        self.assertTrue(ProductionObservation.objects.filter(date=self.TODAY, domain="pix_fr").exists())
+
+    def test_out_of_range_value_skips_only_that_domain(self):
+        bad = production_record(self.TODAY, lyon=(1e30, 120))
+        with fake_api(production_series(2) + [bad]):
+            run = sync.run_scheduled_sync(today=self.TODAY)
+        self.assertNotEqual(run.status, ImportRun.STATUS_ERROR)
+        self.assertIn(("valeur_invalide", "ac_lyon_fr"), {(a["type"], a["domain"]) for a in run.anomalies})
+        self.assertTrue(ProductionObservation.objects.filter(date=self.TODAY, domain="pix_fr").exists())
+
+    def test_future_dated_snapshot_is_rejected(self):
+        # Sinon la base paraîtrait « à jour » et la source ne serait plus jamais interrogée.
+        future = production_record(date(2099, 1, 1))
+        with fake_api(production_series(3) + [future]):
+            run = sync.run_scheduled_sync(today=self.TODAY)
+        self.assertIn("date_invalide", {a["type"] for a in run.anomalies})
+        self.assertEqual(ProductionObservation.latest_date(), self.TODAY)
+
+    def test_anomaly_detail_is_bounded(self):
+        bad = production_record(self.TODAY, lyon=("x" * 5000, 120))
+        with fake_api(production_series(2) + [bad]):
+            run = sync.run_scheduled_sync(today=self.TODAY)
+        self.assertTrue(all(len(a["detail"]) <= 120 for a in run.anomalies))
+
+    def test_command_refuses_if_new_with_force_beta(self):
+        with self.assertRaises(CommandError):
+            call_command("sync_assistant_data", "--if-new", "--force-beta")
+
+    def test_scheduler_loop_survives_a_failure(self):
+        sleeps = mock.Mock(side_effect=[None, KeyboardInterrupt])  # deux tours, puis arrêt
+        with mock.patch("assistant_dashboard.management.commands.run_sync_scheduler.time.sleep", sleeps), \
+                mock.patch("assistant_dashboard.management.commands.run_sync_scheduler.run_scheduled_sync",
+                           side_effect=RuntimeError("boom")) as check, \
+                self.assertLogs("assistant_dashboard", level="ERROR"), self.assertRaises(KeyboardInterrupt):
+            call_command("run_sync_scheduler")
+        self.assertEqual(check.call_count, 1)
+        self.assertEqual(sleeps.call_count, 2)  # l'échec n'a pas arrêté la boucle
+
+    def test_command_if_new(self):
+        with fake_api(production_series(2)), mock.patch(
+                "assistant_dashboard.services.sync.timezone.localdate", return_value=self.TODAY):
+            call_command("sync_assistant_data", "--if-new", stdout=mock.Mock())
+        self.assertEqual(ImportRun.objects.first().status, ImportRun.STATUS_UNCHANGED)
+
+
 class ContoursAndQualityTests(TestCase):
     def test_contours_matched_by_name_vice_rectorat_exempt(self):
         with fake_api(production_series(2)):
@@ -124,8 +254,7 @@ class ContoursAndQualityTests(TestCase):
 
     def test_known_anomalies_do_not_raise_status_again(self):
         records = [production_record(date(2026, 9, 1)), production_record(date(2026, 9, 3))]  # trou le 02/09
-        with fake_api(records), mock.patch("assistant_dashboard.services.sync.timezone.localdate",
-                                           return_value=date(2026, 9, 3)):
+        with fake_api(records):
             first = sync.run_sync()
             second = sync.run_sync()
         gap = lambda run: [a for a in run.anomalies if a["type"] == "date_manquante"][0]

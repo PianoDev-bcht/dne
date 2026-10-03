@@ -2,7 +2,7 @@
 
 Prototype Django de suivi de l'Assistant IA au ministère de l'Éducation nationale, à partir de l'Open Data (data.education.gouv.fr).
 Il mesure la **diffusion** (nouveaux comptes) et l'**activité** (messages envoyés par les utilisateurs), au niveau national et par académie, sur des fenêtres glissantes de 7 jours.
-Les données sont importées une fois par jour dans une base locale ; **les pages ne lisent que cette base**, jamais l'API distante.
+Les données sont importées automatiquement chaque jour dans une base locale ; **les pages ne lisent que cette base**, jamais l'API distante.
 
 ## Choix de conception
 
@@ -41,7 +41,7 @@ Dépendances : Django et requests, plus gunicorn et whitenoise en production (`r
 
 ## Commandes
 
-### `sync_assistant_data [--force-beta]`
+### `sync_assistant_data [--force-beta] [--if-new]`
 
 Point d'entrée : `services.sync.run_sync`. Dans l'ordre :
 
@@ -62,21 +62,31 @@ SQLITE_PATH=demo.sqlite3 .venv/bin/python manage.py load_demo_data
 SQLITE_PATH=demo.sqlite3 .venv/bin/python manage.py runserver
 ```
 
-### Exécution quotidienne (12:00, Europe/Paris)
+### Automated data pipeline
 
-Le fichier est publié vers 03:00 ; à midi, la veille est disponible. Avec cron (`mkdir -p logs`, puis `crontab -e`) :
+Production data is checked automatically every day from 04:00 Europe/Paris. If the ministry dataset has not yet been updated, the application retries progressively at 04:30, 05:30, 07:30 and 11:30. As soon as a new publication is detected and validated, the indicators are recomputed and no further requests are made that day. The dashboard always keeps the last valid dataset available.
+
+- **Règle** (`services.sync.run_scheduled_sync`) : à chaque créneau, si le snapshot du jour n'est pas en base, une requête d'une seule ligne demande à la source sa date la plus récente ; l'import complet (`run_sync`) n'a lieu que si elle est plus récente. Une fois le snapshot du jour en base, les créneaux suivants ne font aucune requête. L'API n'expose ni `ETag` ni `Last-Modified` : cette requête légère en tient lieu.
+- **Trois issues, journalisées dans `ImportRun` :** nouvelle publication importée (`success` ou `warning`), pas de nouvelle publication (`unchanged`, état normal, sans alerte), échec technique (`error`, les données en place sont conservées). Une source vide ou illisible n'écrit rien ; une valeur invalide ou un snapshot daté dans le futur est écarté et signalé, sans bloquer le reste.
+- **Seule la production est vérifiée chaque jour :** la bêta et les contours, figés, ne sont importés qu'une fois.
+- **Créneaux :** `services/schedule.py` (`SLOTS`). Les lignes cron ci-dessous doivent rester alignées dessus.
+- **Planificateur.** Sur Railway : `manage.py run_sync_scheduler`, lancé par `railway.json` dans le même conteneur que gunicorn (la base SQLite est sur un volume, qu'un service cron séparé ne peut pas partager) et relancé s'il s'arrête. S'il ne tournait plus du tout, l'en-tête l'indiquerait (« pas de fichier aujourd'hui », puis « dernier fichier il y a N j »). Ailleurs, cron suffit (`mkdir -p logs`, puis `crontab -e`) :
 
 ```cron
 CRON_TZ=Europe/Paris
-0 12 * * * cd /chemin/vers/dne && .venv/bin/python manage.py sync_assistant_data >> logs/sync.log 2>&1
+0 4 * * *            cd /chemin/vers/dne && .venv/bin/python manage.py sync_assistant_data --if-new >> logs/sync.log 2>&1
+30 4,5,7,11 * * *    cd /chemin/vers/dne && .venv/bin/python manage.py sync_assistant_data --if-new >> logs/sync.log 2>&1
 ```
+
+- **Déclenchement manuel :** `manage.py sync_assistant_data` (import complet) ou `--if-new` (même règle que le planificateur).
+- **État et journaux :** table `ImportRun` (`/admin/`), fenêtre *Qualité des données* (« dernière synchronisation le 03/10 à 04:03 » ou « prochaine vérification prévue à 05:30 »), `/api/dashboard/summary/` (`sync_state`, `next_check`, `last_sync`, `last_attempt`), et la console pour les logs. Le message d'erreur détaillé n'est pas publié : il reste dans `ImportRun` et dans les logs.
 
 ### Déploiement (Railway)
 
-`railway.json` lance `migrate`, `collectstatic`, une synchronisation, puis gunicorn ; whitenoise sert les fichiers statiques.
+`railway.json` lance `migrate`, `collectstatic`, une synchronisation complète, le planificateur, puis gunicorn ; whitenoise sert les fichiers statiques.
 
 - Définir `DJANGO_SECRET_KEY` et attacher un volume pour conserver la base SQLite.
-- La synchronisation ne tourne qu'au démarrage : pour une mise à jour quotidienne, ajouter un service cron Railway qui lance `python manage.py sync_assistant_data` sur le même volume. Au-delà d'un jour sans nouveau fichier, l'en-tête de la page l'indique.
+- Laisser l'option « app sleeping » désactivée : un conteneur endormi ne lance pas les vérifications. La synchronisation de démarrage rattrape un créneau manqué.
 
 ### Tests
 
@@ -94,13 +104,14 @@ assistant_dashboard/            l'application
   models.py                     BetaLocation, ProductionObservation, ImportRun
   admin.py                      consultation des données et des ImportRun (/admin/)
   services/
-    education_api.py            HTTP uniquement : fetch_all_records, fetch_field_labels
-    sync.py                     écriture en base : run_sync, sync_beta, sync_contours, sync_production
+    education_api.py            HTTP uniquement : fetch_all_records, fetch_latest_timestamp, fetch_field_labels
+    sync.py                     écriture en base : run_sync, run_scheduled_sync, sync_beta, sync_contours, sync_production
+    schedule.py                 créneaux de vérification quotidienne (fonctions pures)
     matching.py                 normalize_name, domain_key, classify_domain, display_name, full_name
     quality.py                  contrôles qualité (fonctions pures)
     metrics.py                  calculs (fonctions pures) : compute_kpis, rolling_series, detect_signals, trend
     dashboard_data.py           lecture de la base, appel à metrics, mise en forme pour les vues
-  management/commands/          sync_assistant_data, load_demo_data
+  management/commands/          sync_assistant_data, run_sync_scheduler, load_demo_data
   views.py, urls.py             page et endpoints JSON
   templatetags/dashboard_format.py   formats français : fr_int, fr_pct, trend, trend_word…
   templates/assistant_dashboard/     dashboard.html, _offmap_table.html, _reco_academies.html, _reco_chip.html
@@ -125,7 +136,7 @@ navigateur ◀── dashboard.js ◀── endpoints JSON / template ◀── 
 
 - **`BetaLocation`** : une académie (nom, `domain_key` tel que `ac_nancy_metz_fr`, coordonnées, `geo_shape`, effectifs de la bêta, jamais présentés comme des comptes de production).
 - **`ProductionObservation`** : cumuls de comptes et de messages pour une date et un domaine de messagerie, uniques sur `(date, domain)`. `category` vaut `academie`, `regional`, `national` ou `non_apparie` ; `location` n'est renseigné que pour les académies.
-- **`ImportRun`** : une synchronisation (statut, compteurs, erreur, `anomalies`). Chaque anomalie porte `new`, vrai si elle était absente de l'import précédent.
+- **`ImportRun`** : une synchronisation ou une vérification (statut `success`, `warning`, `error` ou `unchanged`, compteurs, erreur, `anomalies`). Chaque anomalie porte `new`, vrai si elle était absente de l'import précédent.
 
 ## Sources
 
@@ -187,7 +198,7 @@ Une seule page, `templates/assistant_dashboard/dashboard.html`, animée par `sta
   - **Activation (l'usage ne suit pas) :** nouveaux comptes en hausse et intensité stable (à surveiller) ou en baisse (à investiguer). L'activité (messages) n'est pas un signal : elle sert de contexte.
   - **Volume minimal :** `SIGNAL_MIN_BASE`, sur la plus grande des deux semaines comparées (`metrics.has_min_volume`). En dessous, pas de signal, et le détail indique « volume insuffisant » (`dashboard_data.low_volume`).
   - Ces seuils sont des conventions opérationnelles, pas des tests statistiques.
-- **Contrôles qualité** (`services/quality.py`, et les contours dans `services/sync.py`). Date manquante, domaine absent, doublon, baisse de cumul, nouveau domaine, domaine non apparié, contour manquant, absence de nouveau fichier. L'en-tête ne compte que les anomalies nouvelles ; les points connus restent listés dans *Qualité des données*.
+- **Contrôles qualité** (`services/quality.py`, et les contours dans `services/sync.py`). Date manquante, domaine absent, doublon, baisse de cumul, nouveau domaine, domaine non apparié, contour manquant, valeur invalide, date dans le futur. Un fichier du jour pas encore publié n'est pas une anomalie : c'est l'état « prochaine vérification ». L'en-tête ne compte que les anomalies nouvelles ; les points connus restent listés dans *Qualité des données*.
 
 ### Pourquoi un rolling 7 jours ?
 

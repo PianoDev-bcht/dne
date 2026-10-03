@@ -126,13 +126,30 @@ def snapshot_date(record):
     return ts.astimezone(PARIS).date(), ts
 
 
+MAX_COUNT = 2**31 - 1  # borne de PositiveIntegerField
+
+
+def _count(value):
+    """Cumul valide (entier entre 0 et MAX_COUNT), sinon None."""
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= MAX_COUNT:
+        return value
+    return None
+
+
 def parse_production_records(records):
     """Transforme les lignes larges en {(date, domaine): {...}} + anomalies."""
     values, anomalies = {}, []
+    today = timezone.localdate()
     for record in sorted(records, key=lambda r: r.get("timestamp") or r.get("cree_le") or ""):
         day, ts = snapshot_date(record)
         if day is None:
             anomalies.append(quality.anomaly("date_manquante", "snapshot sans timestamp ni cree_le, ignoré"))
+            continue
+        if day > today:
+            # Un snapshot daté dans le futur ferait croire que la base est à jour : il est écarté.
+            anomalies.append(quality.anomaly("date_invalide", "snapshot daté dans le futur, ignoré", date=day))
             continue
         per_domain = defaultdict(dict)
         for column, value in record.items():
@@ -147,10 +164,14 @@ def parse_production_records(records):
             if pair.get("users") is None or pair.get("messages") is None:
                 anomalies.append(quality.anomaly("valeur_manquante", f"valeurs incomplètes : {pair}", domain, day))
                 continue
+            users, messages = _count(pair["users"]), _count(pair["messages"])
+            if users is None or messages is None:
+                anomalies.append(quality.anomaly("valeur_invalide", f"valeurs invalides : {pair}", domain, day))
+                continue
             if (day, domain) in values:
                 anomalies.append(quality.anomaly(
                     "doublon", "plusieurs snapshots le même jour : le plus récent est conservé", domain, day))
-            values[(day, domain)] = {"users": pair["users"], "messages": pair["messages"], "ts": ts}
+            values[(day, domain)] = {"users": users, "messages": messages, "ts": ts}
     return values, anomalies
 
 
@@ -172,6 +193,8 @@ def sync_production(records, labels, run):
     known_domains = set(ProductionObservation.objects.values_list("domain", flat=True).distinct())
 
     values, anomalies = parse_production_records(records)
+    if not values:  # validation structurelle : rien n'est écrit si la source est vide ou illisible
+        raise ValueError("aucune observation exploitable dans le dataset de production")
 
     locations = list(BetaLocation.objects.all())
     by_key = {loc.domain_key: loc for loc in locations}
@@ -218,8 +241,6 @@ def sync_production(records, labels, run):
     anomalies += quality.check_missing_domains(by_date)
     anomalies += quality.check_decreases(series)
     anomalies += quality.check_new_domains(domains, known_domains)
-    current_latest = max(by_date) if by_date else None
-    anomalies += quality.check_stale_data(current_latest, timezone.localdate())
 
     run.number_of_records_fetched = len(records)
     run.number_of_records_created = created
@@ -251,16 +272,39 @@ def run_sync(force_beta=False, session=None):
     return run
 
 
+def run_scheduled_sync(today=None):
+    """Vérification planifiée : n'importe que si la source a publié un nouveau snapshot.
+
+    - snapshot du jour déjà en base : rien à faire, aucune requête (retourne None) ;
+    - source joignable mais sans nouveau snapshot : état normal, journalisé « unchanged » ;
+    - source injoignable ou illisible : journalisé « error », les données restent en place ;
+    - nouveau snapshot : synchronisation complète (`run_sync`).
+    """
+    today = today or timezone.localdate()
+    latest = ProductionObservation.latest_date()
+    if latest and latest >= today:
+        return None
+    try:
+        raw = education_api.fetch_latest_timestamp(education_api.PRODUCTION_DATASET)
+        published, _ = snapshot_date({"timestamp": raw})
+    except Exception as exc:
+        logger.exception("Échec de la vérification de publication")
+        return ImportRun.objects.create(
+            status=ImportRun.STATUS_ERROR, error_message=str(exc), finished_at=timezone.now())
+    if latest and published and published <= latest:
+        return ImportRun.objects.create(status=ImportRun.STATUS_UNCHANGED, finished_at=timezone.now())
+    return run_sync()
+
+
 def mark_new_anomalies(run):
     """Marque `new=True` les anomalies absentes du dernier import réussi.
 
     Les points déjà connus (ex. trous de publication historiques) restent
     listés mais ne relancent pas l'alerte à chaque synchronisation.
-    Des données périmées sont toujours signalées comme nouvelles.
     """
     previous = (ImportRun.objects.exclude(pk=run.pk)
-                .filter(status__in=[ImportRun.STATUS_SUCCESS, ImportRun.STATUS_WARNING]).first())
+                .filter(status__in=ImportRun.COMPLETED).first())
     key = lambda a: (a["type"], a.get("domain", ""), a.get("date", ""), a.get("detail", ""))
     known = {key(a) for a in previous.anomalies} if previous else set()
     for a in run.anomalies:
-        a["new"] = a["type"] == "pas_de_nouvelles_donnees" or key(a) not in known
+        a["new"] = key(a) not in known

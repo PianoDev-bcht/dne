@@ -14,15 +14,17 @@
     <div>
       <h1>Déploiement de l’Assistant IA</h1>
       <p class="subtitle">Pilotage de la diffusion et de l’activité
-        <span class="freshness">· {% if freshness.data_date %}Données au <strong>{{ freshness.data_date|date:"d/m/Y" }}</strong>{% else %}Aucune donnée. Lancer <code>python manage.py sync_assistant_data</code>.{% endif %}</span>
+        <span class="freshness">· {% if freshness.data_date %}Données du <strong>{{ freshness.data_date|date:"d/m/Y" }}</strong>{% else %}Aucune donnée. Lancer <code>python manage.py sync_assistant_data</code>.{% endif %}</span>
       </p>
     </div>
     <nav class="header-actions" aria-label="Informations complémentaires">
       <button type="button" class="ghost-button" data-open="dialog-method">ⓘ Méthodologie</button>
-      {% if freshness.last_run_status == "error" %}
+      {% if freshness.sync_state == "error" %}
         <button type="button" class="ghost-button status-error" data-open="dialog-quality">Qualité des données · échec de synchronisation</button>
       {% elif freshness.stale_days > 1 %}
         <button type="button" class="ghost-button" data-open="dialog-quality">Qualité des données <span class="warn">⚠ dernier fichier il y a {{ freshness.stale_days }} j</span></button>
+      {% elif freshness.sync_state == "no_publication_today" %}
+        <button type="button" class="ghost-button" data-open="dialog-quality">Qualité des données <span class="warn">⚠ pas de fichier aujourd’hui</span></button>
       {% elif freshness.anomaly_count %}
         <button type="button" class="ghost-button" data-open="dialog-quality">Qualité des données <span class="warn">⚠ {{ freshness.anomaly_count }}</span></button>
       {% else %}
@@ -308,8 +310,12 @@
 
 <dialog id="dialog-quality" class="dialog" aria-labelledby="quality-title">
   <div class="dialog-head"><h2 id="quality-title">Qualité des données</h2><button type="button" class="close" data-close aria-label="Fermer">×</button></div>
-  {% if freshness.last_sync %}<p class="muted">Dernière synchronisation : {{ freshness.last_sync|date:"d/m/Y H:i" }}</p>{% endif %}
-  {% if freshness.last_run_status == "error" %}<p class="status-error-text">Échec de la dernière synchronisation : {{ freshness.last_run_error }}. Données précédentes affichées.</p>{% endif %}
+  {% if freshness.data_date %}<p class="muted">Données du {{ freshness.data_date|date:"d/m/Y" }} ·
+    {% if freshness.sync_state == "up_to_date" %}{% if freshness.last_sync %}dernière synchronisation le {{ freshness.last_sync|date:"d/m à H:i" }}{% else %}à jour{% endif %}
+    {% elif freshness.sync_state == "syncing" %}synchronisation en cours
+    {% elif freshness.sync_state == "no_publication_today" %}pas de fichier publié aujourd’hui · prochaine vérification demain à {{ freshness.next_check|date:"H:i" }}
+    {% else %}prochaine vérification prévue {% if freshness.next_check_tomorrow %}demain {% endif %}à {{ freshness.next_check|date:"H:i" }}{% endif %}</p>{% endif %}
+  {% if freshness.sync_state == "error" %}<p class="status-error-text">Échec de la dernière vérification{% if freshness.last_attempt %} ({{ freshness.last_attempt|date:"d/m à H:i" }}){% endif %} : source indisponible ou réponse illisible. Données précédentes affichées.</p>{% endif %}
   {% if freshness.stale_days > 1 %}<p class="status-error-text">Dernier fichier importé il y a {{ freshness.stale_days }} jours : les chiffres affichés ne sont pas à jour. Vérifier la synchronisation quotidienne.</p>{% endif %}
   <h3>Nouvelles anomalies</h3>
   {% for g in freshness.anomalies_new %}

@@ -53,6 +53,15 @@ class FetchAllRecordsTests(SimpleTestCase):
         with self.assertRaises(EducationAPIError):
             fetch_all_records("ds", session=session)
 
+    def test_latest_timestamp_asks_for_a_single_row(self):
+        session = mock.Mock()
+        session.get.return_value = response(payload={"total_count": 96, "results": [{"timestamp": "2026-10-03T01:00:01+00:00"}]})
+        self.assertEqual(education_api.fetch_latest_timestamp("ds", session=session), "2026-10-03T01:00:01+00:00")
+        self.assertEqual(session.get.call_args.kwargs["params"],
+                         {"select": "timestamp", "order_by": "timestamp desc", "limit": 1})
+        session.get.return_value = response(payload={"total_count": 0, "results": []})
+        self.assertIsNone(education_api.fetch_latest_timestamp("ds", session=session))
+
     @override_settings(EDUCATION_API_KEY="secret")
     def test_api_key_header_when_configured(self):
         session = mock.Mock()

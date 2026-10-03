@@ -76,18 +76,26 @@ class ProductionObservation(models.Model):
     def __str__(self):
         return f"{self.date} {self.domain}"
 
+    @classmethod
+    def latest_date(cls):
+        """Date du snapshot le plus récent en base (None si la base est vide)."""
+        return cls.objects.aggregate(latest=models.Max("date"))["latest"]
+
 
 class ImportRun(models.Model):
     STATUS_RUNNING = "running"
     STATUS_SUCCESS = "success"
     STATUS_WARNING = "warning"
     STATUS_ERROR = "error"
+    STATUS_UNCHANGED = "unchanged"  # source joignable, pas de nouveau snapshot : état normal
     STATUS_CHOICES = [
         (STATUS_RUNNING, "En cours"),
         (STATUS_SUCCESS, "Succès"),
         (STATUS_WARNING, "Succès avec anomalies"),
         (STATUS_ERROR, "Erreur"),
+        (STATUS_UNCHANGED, "Pas de nouvelle publication"),
     ]
+    COMPLETED = (STATUS_SUCCESS, STATUS_WARNING)  # imports complets : seuls à porter des anomalies
 
     started_at = models.DateTimeField(auto_now_add=True)
     finished_at = models.DateTimeField(null=True, blank=True)

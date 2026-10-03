@@ -76,6 +76,18 @@ def fetch_all_records(dataset, session=None, page_size=PAGE_SIZE):
     return records
 
 
+def fetch_latest_timestamp(dataset, session=None):
+    """Horodatage du snapshot le plus récent (une seule ligne demandée), None si le dataset est vide.
+
+    L'API n'expose ni ETag ni Last-Modified : cette requête légère en tient lieu
+    pour savoir si une nouvelle publication existe avant de tout récupérer.
+    """
+    url = f"{settings.EDUCATION_API_BASE}/{dataset}/records/"
+    payload = _get(url, {"select": "timestamp", "order_by": "timestamp desc", "limit": 1}, session)
+    results = payload.get("results") or []
+    return results[0].get("timestamp") if results else None
+
+
 def fetch_field_labels(dataset, session=None):
     """Retourne {nom_colonne: libellé} à partir des métadonnées du dataset."""
     payload = _get(f"{settings.EDUCATION_API_BASE}/{dataset}", session=session)
