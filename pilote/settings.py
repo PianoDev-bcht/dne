@@ -21,12 +21,23 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure--lvum)3axwa8)m#i5lhharpk9&7s0ypz*4ehogaqg!pc+4nxyj'
+SECRET_KEY = os.environ.get(
+    'DJANGO_SECRET_KEY',
+    'django-insecure--lvum)3axwa8)m#i5lhharpk9&7s0ypz*4ehogaqg!pc+4nxyj',
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+# Désactivé par défaut sur Railway ; DJANGO_DEBUG=1 pour forcer.
+ON_RAILWAY = 'RAILWAY_ENVIRONMENT_NAME' in os.environ
+DEBUG = os.environ.get('DJANGO_DEBUG', '0' if ON_RAILWAY else '1') == '1'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+CSRF_TRUSTED_ORIGINS = []
+if os.environ.get('RAILWAY_PUBLIC_DOMAIN'):
+    ALLOWED_HOSTS.append(os.environ['RAILWAY_PUBLIC_DOMAIN'])
+    CSRF_TRUSTED_ORIGINS.append(f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}")
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = True
 
 
 # Application definition
@@ -43,6 +54,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.middleware.gzip.GZipMiddleware',  # contours des académies (~0,5 Mo)
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -118,6 +130,13 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STORAGES = {
+    'default': {'BACKEND': 'django.core.files.storage.FileSystemStorage'},
+    # Le manifeste exige collectstatic : seulement en production (pas pour les tests).
+    'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+                    if ON_RAILWAY else 'django.contrib.staticfiles.storage.StaticFilesStorage'},
+}
 
 
 # Email
