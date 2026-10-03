@@ -90,7 +90,10 @@ WSGI_APPLICATION = 'pilote.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': os.environ.get('SQLITE_PATH', BASE_DIR / 'db.sqlite3'),
+        # Sur Railway, la base va dans le volume attaché (s'il existe).
+        'NAME': os.environ.get('SQLITE_PATH') or Path(
+            os.environ.get('RAILWAY_VOLUME_MOUNT_PATH', BASE_DIR)
+        ) / 'db.sqlite3',
     }
 }
 

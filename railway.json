@@ -1,6 +1,6 @@
 {
   "$schema": "https://railway.com/railway.schema.json",
   "deploy": {
-    "startCommand": "python manage.py migrate --noinput && python manage.py collectstatic --noinput && (python manage.py sync_assistant_data || true) && gunicorn pilote.wsgi --bind 0.0.0.0:$PORT"
+    "startCommand": "echo \"Volume: ${RAILWAY_VOLUME_MOUNT_PATH:-aucun}\" && python manage.py migrate --noinput && python manage.py collectstatic --noinput && (python manage.py sync_assistant_data || true) && gunicorn pilote.wsgi --bind 0.0.0.0:$PORT"
   }
 }
