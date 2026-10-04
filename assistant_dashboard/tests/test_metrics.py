@@ -102,11 +102,22 @@ class WindowTests(SimpleTestCase):
         self.assertTrue(k["window_has_gap"])
         self.assertEqual(k["new_users"], 70)  # le rattrapage conserve le total
 
-    def test_rolling_series(self):
-        r = metrics.rolling_series(metrics.build_daily_series(linear(10)), "new_users")
-        self.assertEqual(len(r), 3)  # premier jour sans flux, puis fenêtres complètes
-        self.assertTrue(all(p["value"] == 70 for p in r))
-        self.assertEqual(len(metrics.rolling_series(metrics.build_daily_series(linear(20)), "new_users", last_n_days=5)), 5)
+    def test_daily_points(self):
+        r = metrics.daily_points(metrics.build_daily_series(linear(10)), "new_users")
+        self.assertEqual(len(r), 9)  # le premier jour n'a pas de fichier précédent
+        self.assertTrue(all(p["value"] == 10 and not p["has_gap"] for p in r))
+        self.assertEqual(len(metrics.daily_points(metrics.build_daily_series(linear(20)), "new_users", last_n_days=5)), 5)
+
+    def test_daily_points_flag_missing_days_and_catch_up_day(self):
+        # Fichiers absents pour D0+2 et D0+3 : le rattrapage tombe sur D0+4 (30 comptes pour 3 jours).
+        pts = [p for p in linear(7) if p[0] not in (D0 + timedelta(2), D0 + timedelta(3))]
+        r = metrics.daily_points(metrics.build_daily_series(pts), "new_users")
+        self.assertEqual([p["has_gap"] for p in r], [False, True, True, True, False, False])
+        self.assertEqual([p["value"] for p in r], [10, 0, 0, 30, 10, 10])
+
+    def test_daily_points_floor_negative_flow(self):
+        r = metrics.daily_points(metrics.build_daily_series([(D0, 10, 100), (D0 + timedelta(1), 8, 90)]), "new_users")
+        self.assertEqual(r[0]["value"], 0)
 
 
 class AggregateTests(SimpleTestCase):
@@ -134,84 +145,138 @@ class AggregateTests(SimpleTestCase):
 
 
 class SignalTests(SimpleTestCase):
-    NATIONAL = {"new_users_change_pct": 0.0, "messages_change_pct": 0.05}
+    """7 jours pour détecter (à suivre), 14 jours pour agir (à analyser)."""
+    NATIONAL = {"new_users_change_pct": 0.0, "messages_change_pct": 0.0, "activity_change_pct": 0.0}
 
-    def kpis(self, users_pct=0.0, users_prev=50, msg_pct=0.05, msg_prev=1000, intensity_pct=0.0):
-        return {"new_users_change_pct": users_pct, "previous_new_users": users_prev,
-                "messages_change_pct": msg_pct, "previous_messages": msg_prev,
+    def kpis(self, users_pct=0.0, prev=200, cur=None, intensity_pct=0.0, msgs=5000):
+        cur = round(prev * (1 + users_pct)) if cur is None else cur
+        return {"new_users_change_pct": users_pct, "previous_new_users": prev, "new_users": cur,
+                "messages_change_pct": 0.0, "previous_messages": msgs, "messages": msgs,
                 "activity_change_pct": intensity_pct}
 
-    def levels(self, signals):
-        return [(s["kind"], s["metric"], s["level"]) for s in signals]
+    def signals(self, k7=None, k14=None, n7=None, n14=None, blocked=None):
+        return metrics.detect_signals(k7 or self.kpis(), n7 or self.NATIONAL,
+                                      k14 or self.kpis(), n14 or self.NATIONAL, blocked)
+
+    def summary(self, signals):
+        return [(s["kind"], s["window"], s["level"]) for s in signals]
+
+    def test_relative_change(self):
+        self.assertAlmostEqual(metrics.relative_change(-0.10, 0.10), 0.9 / 1.1 - 1)  # exemple de la méthodologie
+        self.assertAlmostEqual(metrics.relative_change(-0.55, -0.50), -0.10)       # vacances : effet commun neutralisé
+        self.assertIsNone(metrics.relative_change(None, 0.1))
 
     def test_no_signal_when_in_line_with_national(self):
-        self.assertEqual(metrics.detect_signals(self.kpis(), self.NATIONAL), [])
+        self.assertEqual(self.signals(), [])
 
-    def test_gap_to_national_trend_uses_same_7_day_change(self):
-        k = self.kpis(users_pct=-0.44)
-        signals = metrics.detect_signals(k, self.NATIONAL)
-        self.assertEqual(self.levels(signals), [("ecart_inferieur", "new_users", "strong")])
-        self.assertEqual(signals[0]["evolution"], k["new_users_change_pct"])  # cohérent avec le KPI
-        self.assertAlmostEqual(signals[0]["gap"], -0.44)
+    def test_action_on_14_days_at_20_percent_confirmed_by_last_week(self):
+        down7, up7 = self.kpis(-0.05), self.kpis(0.05, intensity_pct=0.1)
+        self.assertEqual(self.summary(self.signals(k7=down7, k14=self.kpis(-0.20))), [("ecart_inferieur", 14, "strong")])
+        self.assertEqual(self.summary(self.signals(k7=up7, k14=self.kpis(0.25, intensity_pct=0.1))),
+                         [("ecart_superieur", 14, "strong")])
+        self.assertEqual(self.signals(k7=down7, k14=self.kpis(-0.19)), [])
 
-    def test_two_levels(self):
-        national = {"new_users_change_pct": -0.01, "messages_change_pct": 0.05}
-        # France −1 %, académie +29 % : 30 points d'écart -> signal fort
-        strong = metrics.detect_signals(self.kpis(users_pct=0.29, intensity_pct=0.1), national)
-        self.assertEqual(self.levels(strong)[0], ("ecart_superieur", "new_users", "strong"))
-        # 20 points -> à surveiller ; 10 points -> rien
-        self.assertEqual(self.levels(metrics.detect_signals(self.kpis(users_pct=0.19, intensity_pct=0.1), national))[0],
-                         ("ecart_superieur", "new_users", "watch"))
-        self.assertEqual(metrics.detect_signals(self.kpis(users_pct=0.09, intensity_pct=0.1), national), [])
+    def test_unconfirmed_14_day_trend_stays_watch(self):
+        # Créteil : −21 % sur 14 jours mais +12 % sur la dernière semaine -> à suivre, pas d'action
+        s = self.signals(k7=self.kpis(0.10), k14=self.kpis(-0.25))
+        self.assertEqual(self.summary(s), [("ecart_inferieur", 14, "watch")])
+        self.assertEqual(s[0]["reason"], "tendance sur 14 jours non confirmée par la dernière semaine")
+        self.assertAlmostEqual(s[0]["relative7"], 0.10)
 
-    def test_strong_signals_listed_first(self):
-        national = {"new_users_change_pct": 0.0, "messages_change_pct": 0.05}
-        # +20 % vs France 0 % -> diffusion à surveiller ; intensité −10 % -> activation forte
-        signals = metrics.detect_signals(self.kpis(users_pct=0.20, intensity_pct=-0.10), national)
-        self.assertEqual([(s["kind"], s["level"]) for s in signals],
-                         [("activation", "strong"), ("ecart_superieur", "watch")])
+    def test_watch_on_7_days_at_15_percent(self):
+        self.assertEqual(self.summary(self.signals(k7=self.kpis(-0.15, prev=60))), [("ecart_inferieur", 7, "watch")])
+        self.assertEqual(self.signals(k7=self.kpis(-0.14, prev=60)), [])
 
-    def test_messages_gap_is_not_a_signal(self):
-        # L'activité est un contexte, pas un signal : +60 % de messages ne déclenche rien
-        self.assertEqual(metrics.detect_signals(self.kpis(msg_pct=0.65), self.NATIONAL), [])
+    def test_14_day_signal_wins_over_7_day(self):
+        s = self.signals(k7=self.kpis(-0.30), k14=self.kpis(-0.25))  # 7 j de même sens : confirmé
+        self.assertEqual(self.summary(s), [("ecart_inferieur", 14, "strong")])
 
     def test_common_drop_is_not_a_signal(self):
-        # Vacances : tout le territoire baisse de 50 % -> pas d'écart propre à l'académie
-        national = {"new_users_change_pct": -0.5, "messages_change_pct": -0.5}
-        self.assertEqual(metrics.detect_signals(self.kpis(users_pct=-0.55, msg_pct=-0.45), national), [])
+        national = {"new_users_change_pct": -0.5, "messages_change_pct": -0.5, "activity_change_pct": 0.0}
+        self.assertEqual(self.signals(k14=self.kpis(-0.55), n14=national, k7=self.kpis(-0.55), n7=national), [])
 
-    def test_minimum_volume_on_larger_of_two_weeks(self):
-        national = {"new_users_change_pct": -0.01, "messages_change_pct": 0.05}
-        def kinds(prev, cur):
-            k = self.kpis(users_pct=cur / prev - 1, users_prev=prev, intensity_pct=0.5)
-            k["new_users"] = cur
-            return [(s["metric"], s["level"]) for s in metrics.detect_signals(k, national)]
-        self.assertEqual(kinds(26, 82), [("new_users", "strong")])  # Grenoble : 82 cette semaine suffit
-        self.assertEqual(kinds(39, 27), [])                         # Montpellier : aucune semaine à 50
-        self.assertEqual(kinds(49, 49 * 1.7), [("new_users", "strong")])
-        self.assertEqual(kinds(29, 49), [])                         # Dijon : 49 au plus
+    def test_volume_required_on_each_period(self):
+        self.assertEqual(metrics.MIN_PERIOD_VOLUME, {7: {"new_users": 40, "messages": 400},
+                                                     14: {"new_users": 80, "messages": 800}})
+        # Évolutions nettement au-delà des seuils : seul le volume peut empêcher le signal.
+        self.assertEqual(self.signals(k14=self.kpis(0.9, prev=79, cur=150)), [])   # 79 avant : pas évalué
+        self.assertEqual(self.signals(k14=self.kpis(-0.47, prev=150, cur=79)), [])  # 79 après : pas évalué
+        self.assertEqual(self.signals(k7=self.kpis(2.36, prev=28, cur=94)), [])     # Grenoble : petite base
+        # 56 < 80 sur la période récente : pas de signal sur 14 jours, seul le signal sur 7 jours reste.
+        s = self.signals(k7=self.kpis(-0.30), k14=self.kpis(-0.30, prev=80, cur=56))
+        self.assertEqual(self.summary(s), [("ecart_inferieur", 7, "watch")])
 
-    def test_minimum_volume(self):
-        self.assertEqual(metrics.SIGNAL_MIN_BASE, {"new_users": 50, "messages": 400})
-        self.assertEqual(metrics.detect_signals(self.kpis(users_pct=2.0, users_prev=49), self.NATIONAL), [])
+    def test_confirmation_needs_a_non_stable_week(self):
+        # Normandie : −21 % sur 14 jours, mais −0,09 % sur 7 jours (zone stable) : pas d'action.
+        s = self.signals(k7=self.kpis(-0.0009), k14=self.kpis(-0.21))
+        self.assertEqual(self.summary(s), [("ecart_inferieur", 14, "watch")])
+        self.assertEqual(s[0]["reason"], "tendance sur 14 jours non confirmée par la dernière semaine")
 
-    def test_activation_when_usage_does_not_follow(self):
-        def levels(users, intensity):
-            # Écarts nationaux neutralisés : seul le signal d'activation est testé
-            national = {"new_users_change_pct": users, "messages_change_pct": 0.05}
-            return [(s["kind"], s["level"]) for s in
-                    metrics.detect_signals(self.kpis(users_pct=users, intensity_pct=intensity), national)]
-        self.assertEqual(levels(0.09, -0.16), [("activation", "strong")])  # Rennes : intensité en baisse
-        self.assertEqual(levels(0.20, -0.05), [("activation", "strong")])  # −5 % = en baisse
+    def test_confirmation_needs_weekly_volume(self):
+        # Grenoble : la semaine précédente ne compte que 28 comptes (< 40) : pas d'action.
+        s = self.signals(k7=self.kpis(2.36, prev=28, cur=94), k14=self.kpis(0.49, prev=82, cur=122, intensity_pct=0.1))
+        self.assertEqual(self.summary(s), [("ecart_superieur", 14, "watch")])
+        self.assertEqual(s[0]["reason"], "volume insuffisant sur la dernière semaine")
+        self.assertIsNone(s[0]["display"]["rel7"])
+
+    def test_opposite_last_week_is_not_hidden(self):
+        # Strasbourg : +28 % sur 14 jours, −26 % sur 7 jours : c'est le ralentissement récent qui est montré.
+        s = self.signals(k7=self.kpis(-0.26), k14=self.kpis(0.28, intensity_pct=0.1))
+        self.assertEqual(self.summary(s), [("ecart_inferieur", 7, "watch")])
+
+    def test_display_is_rounded_toward_zero(self):
+        self.assertEqual(metrics.display_pct(-0.1975), -19)               # Amiens : seuil de 20 % non atteint
+        self.assertEqual(metrics.display_pct(-0.19999999999999996), -20)  # seuil atteint, même chiffre
+        self.assertEqual(metrics.display_pct(0.29), 29)
+        s = self.signals(k7=self.kpis(-0.10), k14=self.kpis(-0.25))
+        self.assertEqual(s[0]["display"], {"rel14": -25, "rel7": -10})
+
+    def test_activation_never_with_strong_slowdown(self):
+        # Comptes +10 % mais −21 % par rapport aux académies (+40 %), confirmé sur 7 jours :
+        # 02 Diagnostiquer, et pas 03 Activer en même temps, même si l'intensité baisse.
+        ref14 = {"new_users_change_pct": 0.4, "messages_change_pct": 0.0, "activity_change_pct": 0.0}
+        ref7 = {"new_users_change_pct": 0.1, "messages_change_pct": 0.0, "activity_change_pct": 0.0}
+        s = self.signals(k7=self.kpis(-0.10), n7=ref7, k14=self.kpis(0.10, intensity_pct=-0.2), n14=ref14)
+        self.assertEqual(self.summary(s), [("ecart_inferieur", 14, "strong")])
+
+    def test_blocked_action_is_downgraded_with_reason(self):
+        s = self.signals(k7=self.kpis(-0.10), k14=self.kpis(-0.30), blocked="vacances d'hiver")
+        self.assertEqual(self.summary(s), [("ecart_inferieur", 14, "watch")])
+        self.assertEqual(s[0]["reason"], "vacances d'hiver")
+
+    def test_activation_on_14_days(self):
+        def levels(users, intensity, blocked=None):
+            national = {"new_users_change_pct": users, "messages_change_pct": 0.0, "activity_change_pct": 0.0}
+            k14 = self.kpis(users, intensity_pct=intensity)
+            return [(s["kind"], s["level"]) for s in self.signals(k14=k14, n14=national, blocked=blocked)]
+        self.assertEqual(levels(0.09, -0.16), [("activation", "strong")])
         self.assertEqual(levels(0.25, -0.04), [("activation", "watch")])   # intensité stable
-        self.assertEqual(levels(0.25, 0.0), [("activation", "watch")])
-        self.assertEqual(levels(0.18, 0.13), [])                           # l'usage suit
-        self.assertEqual(levels(0.04, -0.20), [])                          # diffusion stable
-        self.assertEqual(levels(0.25, None), [])                           # intensité non calculable
+        self.assertEqual(levels(0.18, 0.13), [])                            # l'usage suit
+        self.assertEqual(levels(0.04, -0.20), [])                           # diffusion stable
+        self.assertEqual(levels(0.09, -0.16, blocked="x"), [("activation", "watch")])
 
-    def test_activation_needs_both_volumes(self):
-        national = {"new_users_change_pct": 0.25, "messages_change_pct": 0.05}
-        self.assertEqual(metrics.detect_signals(self.kpis(users_pct=0.25, msg_prev=100), national), [])
+    def test_activation_is_relative_to_national_intensity(self):
+        def kinds(local, national):
+            n14 = {"new_users_change_pct": 0.2, "messages_change_pct": 0.0, "activity_change_pct": national}
+            return [(s["kind"], s["level"]) for s in self.signals(k14=self.kpis(0.2, intensity_pct=local), n14=n14)]
+        self.assertEqual(kinds(-0.155, -0.207), [])                    # Aix-Marseille : mieux que la France
+        self.assertEqual(kinds(-0.20, 0.0), [("activation", "strong")])
+        self.assertEqual(kinds(-0.03, 0.0), [("activation", "watch")])
+
+    def test_activation_needs_message_volume(self):
+        national = {"new_users_change_pct": 0.2, "messages_change_pct": 0.0, "activity_change_pct": 0.0}
+        k14 = self.kpis(0.2, intensity_pct=-0.2, msgs=700)
+        self.assertEqual(self.signals(k14=k14, n14=national), [])
+
+    def test_window_boundary_gap(self):
+        end = date(2026, 10, 2)
+        # Trous du 04 au 08/09 : la veille du début de la période précédente (05/09) est manquante.
+        missing = {date(2026, 9, d) for d in range(4, 9)}
+        self.assertTrue(metrics.window_boundary_gap(missing, end, 14))
+        self.assertFalse(metrics.window_boundary_gap(missing, date(2026, 10, 7), 14))  # période dès le 10/09
+        # Un trou entièrement à l'intérieur d'une période ne fausse pas son total.
+        self.assertFalse(metrics.window_boundary_gap({date(2026, 9, 25)}, end, 14))
+        self.assertTrue(metrics.window_boundary_gap({date(2026, 9, 18)}, end, 14))  # fin de la période précédente
 
 
 class TrendThresholdTests(SimpleTestCase):

@@ -8,13 +8,13 @@ une ligne par (date, domaine).
 import logging
 import re
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
 
-from ..models import BetaLocation, ImportRun, ProductionObservation
+from ..models import BetaLocation, ImportRun, ProductionObservation, SchoolHoliday
 from . import education_api, matching, quality
 
 logger = logging.getLogger(__name__)
@@ -110,6 +110,78 @@ def sync_contours(records=None, force=False, session=None):
     for loc in locations:
         if loc.pk not in matched and not loc.geo_shape and loc.normalized_name not in matching.VICE_RECTORATS:
             anomalies.append(quality.anomaly("contour_manquant", f"pas de contour pour {loc.name} (affichée en pastille)"))
+    return anomalies
+
+
+# --- Calendrier scolaire ----------------------------------------------------
+
+# Lieux du calendrier qui ne sont pas des académies de la bêta : ignorés sans anomalie.
+CALENDAR_NOT_ACADEMIES = {"saint pierre et miquelon"}
+
+
+def school_years(today):
+    """Année scolaire en cours et précédente, ex. ["2025-2026", "2026-2027"] (bascule au 1er août)."""
+    y = today.year if today.month >= 8 else today.year - 1
+    return [f"{y - 1}-{y}", f"{y}-{y + 1}"]
+
+
+def _paris_date(raw):
+    return datetime.fromisoformat(raw).astimezone(PARIS).date()
+
+
+def holiday_period(record):
+    """(premier jour, dernier jour) de vacances, en heure de Paris.
+
+    `end_date` est le jour de reprise : le dernier jour de vacances est la veille.
+    Pour un pont d'un jour, début et fin sont identiques.
+    """
+    start, end = _paris_date(record["start_date"]), _paris_date(record["end_date"])
+    return start, (end - timedelta(days=1) if end > start else start)
+
+
+def is_school_holiday(record):
+    """Vacances et ponts des élèves (les lignes « Enseignants » et les rentrées sont ignorées)."""
+    description = (record.get("description") or "").lower()
+    population = record.get("population") or "-"
+    return description.startswith(("vacances", "pont")) and "enseignant" not in population.lower()
+
+
+def sync_holidays(records=None, session=None, today=None):
+    """Importe les vacances scolaires par académie (année en cours et précédente).
+
+    Contexte seulement : une période de vacances n'exclut aucune donnée, elle
+    empêche une recommandation automatique pendant les vacances de l'académie.
+    Idempotent ; ne supprime rien. Retourne des anomalies de qualité.
+    """
+    today = today or timezone.localdate()
+    years = school_years(today)
+    if records is None:
+        where = " or ".join(f'annee_scolaire="{y}"' for y in years)
+        records = education_api.fetch_all_records(education_api.CALENDAR_DATASET, session=session, where=where)
+    by_name = {loc.normalized_name: loc for loc in BetaLocation.objects.all()}
+    anomalies, unmatched = [], set()
+    with transaction.atomic():
+        for r in records:
+            if not is_school_holiday(r) or not r.get("start_date") or not r.get("end_date"):
+                continue
+            name = matching.normalize_name(r.get("location"))
+            loc = by_name.get(name)
+            if loc is None:
+                if name not in CALENDAR_NOT_ACADEMIES:
+                    unmatched.add(r.get("location"))
+                continue
+            start, end = holiday_period(r)
+            SchoolHoliday.objects.update_or_create(
+                location=loc, description=r["description"], start=start,
+                defaults={"end": end, "school_year": r.get("annee_scolaire") or "", "zone": r.get("zones") or ""},
+            )
+    for name in sorted(unmatched):
+        anomalies.append(quality.anomaly("calendrier_non_apparie", f"lieu « {name} » sans académie"))
+    covered = set(SchoolHoliday.objects.filter(school_year=years[-1]).values_list("location_id", flat=True))
+    for loc in by_name.values():
+        if loc.pk not in covered:
+            anomalies.append(quality.anomaly(
+                "calendrier_manquant", f"pas de vacances {years[-1]} pour {loc.name} : aucune exclusion calendrier"))
     return anomalies
 
 
@@ -255,6 +327,11 @@ def run_sync(force_beta=False, session=None):
     try:
         sync_beta(force=force_beta, session=session)
         contour_anomalies = sync_contours(force=force_beta, session=session)
+        try:
+            contour_anomalies += sync_holidays(session=session)
+        except Exception as exc:  # le calendrier est un contexte : son absence ne bloque pas l'import
+            logger.exception("Calendrier scolaire indisponible")
+            contour_anomalies.append(quality.anomaly("calendrier_indisponible", str(exc)))
         ds = education_api.PRODUCTION_DATASET
         records = education_api.fetch_all_records(ds, session=session)
         labels = education_api.fetch_field_labels(ds, session=session)

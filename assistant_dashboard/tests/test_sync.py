@@ -6,11 +6,13 @@ from django.core.management.base import CommandError
 
 from django.test import TestCase
 
-from assistant_dashboard.models import BetaLocation, ImportRun, ProductionObservation
+from assistant_dashboard.models import BetaLocation, ImportRun, ProductionObservation, SchoolHoliday
 from assistant_dashboard.services import dashboard_data, education_api, metrics, sync
-from assistant_dashboard.services.education_api import BETA_DATASET, CONTOURS_DATASET, EducationAPIError
+from assistant_dashboard.services.education_api import (BETA_DATASET, CALENDAR_DATASET, CONTOURS_DATASET,
+                                                         EducationAPIError)
 
-from .factories import BETA_RECORDS, CONTOUR_RECORDS, LABELS, production_record, production_series
+from .factories import (BETA_RECORDS, CALENDAR_RECORDS, CONTOUR_RECORDS, LABELS, production_record,
+                        production_series)
 
 
 def fake_api(production_records, latest=None):
@@ -21,9 +23,11 @@ def fake_api(production_records, latest=None):
     """
     if latest is None:
         latest = max((r.get("timestamp") or "" for r in production_records), default=None) or None
-    def fetch_all(dataset, session=None):
+    def fetch_all(dataset, session=None, **kwargs):
         if dataset == BETA_DATASET:
             return BETA_RECORDS
+        if dataset == CALENDAR_DATASET:
+            return CALENDAR_RECORDS
         if dataset == CONTOURS_DATASET:
             return CONTOUR_RECORDS
         return production_records
@@ -261,3 +265,34 @@ class ContoursAndQualityTests(TestCase):
         self.assertTrue(gap(first)["new"])
         self.assertFalse(gap(second)["new"])
         self.assertEqual(second.status, ImportRun.STATUS_SUCCESS)
+
+
+class HolidaySyncTests(TestCase):
+    def setUp(self):
+        sync.sync_beta(records=BETA_RECORDS)
+        self.today = date(2026, 10, 4)
+
+    def test_import_vacations_only_with_paris_dates(self):
+        sync.sync_holidays(records=CALENDAR_RECORDS, today=self.today)
+        lyon = SchoolHoliday.objects.filter(location__name="Lyon")
+        toussaint = lyon.get(description="Vacances de la Toussaint")
+        # `end_date` = jour de reprise (02/11) : dernier jour de vacances le 01/11.
+        self.assertEqual((toussaint.start, toussaint.end), (date(2026, 10, 17), date(2026, 11, 1)))
+        self.assertEqual(toussaint.zone, "Zone A")
+        pont = lyon.get(description="Pont de l'Ascension")
+        self.assertEqual(pont.start, pont.end)                    # pont d'un jour
+        self.assertFalse(lyon.filter(description__icontains="rentrée").exists())  # lignes enseignants ignorées
+
+    def test_idempotent_and_unmatched_locations(self):
+        anomalies = sync.sync_holidays(records=CALENDAR_RECORDS, today=self.today)
+        count = SchoolHoliday.objects.count()
+        sync.sync_holidays(records=CALENDAR_RECORDS, today=self.today)
+        self.assertEqual(SchoolHoliday.objects.count(), count)
+        kinds = {(a["type"], a["detail"]) for a in anomalies}
+        self.assertIn(("calendrier_non_apparie", "lieu « Atlantide » sans académie"), kinds)
+        self.assertFalse(any("Miquelon" in d for _, d in kinds))   # pas une académie : ignoré sans anomalie
+        self.assertTrue(any(t == "calendrier_manquant" for t, _ in kinds))  # académies sans vacances importées
+
+    def test_school_years(self):
+        self.assertEqual(sync.school_years(date(2026, 10, 4)), ["2025-2026", "2026-2027"])
+        self.assertEqual(sync.school_years(date(2027, 3, 1)), ["2025-2026", "2026-2027"])

@@ -38,3 +38,20 @@ def production_record(day, lyon=(10, 100), polynesie=(1, 5), pix=(2, 3), paca=(0
 
 def production_series(days=3, start=date(2026, 9, 1)):
     return [production_record(start + timedelta(i), lyon=(10 + i, 100 + 10 * i)) for i in range(days)]
+
+
+# Calendrier scolaire au format réel de l'API (dates en UTC, `end_date` = jour de reprise).
+CALENDAR_RECORDS = [
+    {"description": "Vacances de la Toussaint", "population": "-", "start_date": "2026-10-16T22:00:00+00:00",
+     "end_date": "2026-11-01T23:00:00+00:00", "location": "Lyon", "zones": "Zone A", "annee_scolaire": "2026-2027"},
+    {"description": "Pont de l'Ascension", "population": "-", "start_date": "2027-05-06T22:00:00+00:00",
+     "end_date": "2027-05-06T22:00:00+00:00", "location": "Lyon", "zones": "Zone A", "annee_scolaire": "2026-2027"},
+    {"description": "Rentrée scolaire des enseignants", "population": "Enseignants",
+     "start_date": "2026-08-30T22:00:00+00:00", "end_date": "2026-08-30T22:00:00+00:00", "location": "Lyon",
+     "zones": "Zone A", "annee_scolaire": "2026-2027"},
+    {"description": "Vacances de Noël", "population": "-", "start_date": "2026-12-18T23:00:00+00:00",
+     "end_date": "2027-01-03T23:00:00+00:00", "location": "Saint Pierre et Miquelon",
+     "zones": "Saint Pierre et Miquelon", "annee_scolaire": "2026-2027"},
+    {"description": "Vacances de Noël", "population": "-", "start_date": "2026-12-18T23:00:00+00:00",
+     "end_date": "2027-01-03T23:00:00+00:00", "location": "Atlantide", "zones": "Zone Z", "annee_scolaire": "2026-2027"},
+]

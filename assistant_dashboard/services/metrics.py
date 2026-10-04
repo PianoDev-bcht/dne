@@ -11,6 +11,7 @@ Les flux quotidiens s'obtiennent par différence :
 On ne calcule jamais daily_messages / new_users : les messages d'un jour
 peuvent venir de comptes créés bien avant.
 """
+import math
 from datetime import timedelta
 
 WINDOW_DAYS = 7
@@ -19,15 +20,22 @@ WINDOW_DAYS = 7
 # flèches, phrase de synthèse et classe neutre de la carte.
 STABLE_THRESHOLD = 0.05
 
-# Signaux territoriaux. Même référence que tous les autres chiffres (7 derniers
-# jours vs 7 précédents), comparée à la tendance nationale, sur des volumes
-# suffisants. Deux niveaux : on repère tôt (à surveiller), on ne recommande
-# d'agir que sur un écart net (à investiguer).
-# Volume minimal sur la plus grande des deux semaines comparées : en dessous de
-# 50 comptes, le hasard seul fait varier la semaine de plus de ±20 points.
-SIGNAL_MIN_BASE = {"new_users": 50, "messages": 400}
-SIGNAL_WATCH_GAP = 0.15  # écart à la tendance nationale, en points d'évolution : à surveiller
-SIGNAL_MIN_GAP = 0.30    # à investiguer (signal fort)
+# Signaux territoriaux : 7 jours pour détecter, 14 jours pour agir.
+# Mesure unique : l'évolution de l'académie relative à la tendance de l'ensemble des
+# académies (hors domaines nationaux et opérateurs, dont l'évolution propre biaiserait
+# la comparaison), (1 + évolution académie) / (1 + évolution de référence) − 1, soit la
+# variation de sa part dans les nouveaux comptes des académies. Seuils = conventions de
+# pilotage, à recalibrer après plusieurs semaines d'historique propre.
+WATCH_DAYS = 7     # détection précoce : « à suivre », aucune action
+ACTION_DAYS = 14   # décision : « à analyser », déclenche une action
+WATCH_REL = 0.15
+ACTION_REL = 0.20
+# Volume minimal sur CHACUNE des deux périodes comparées (une rupture de périmètre
+# ou une petite base ne peut pas se cacher derrière la période la plus grande).
+MIN_PERIOD_VOLUME = {
+    WATCH_DAYS: {"new_users": 40, "messages": 400},
+    ACTION_DAYS: {"new_users": 80, "messages": 800},  # deux fois le minimum hebdomadaire
+}
 
 
 def build_daily_series(points, end=None):
@@ -203,13 +211,19 @@ def compute_kpis(series, days=WINDOW_DAYS):
     }
 
 
-def rolling_series(series, key, days=WINDOW_DAYS, last_n_days=None):
-    """Somme glissante sur `days` jours pour chaque date (pour les graphiques)."""
+def daily_points(series, key, last_n_days=None):
+    """Flux quotidien pour chaque date (pour les graphiques) : écart entre un fichier et le précédent.
+
+    `has_gap` marque les jours sans fichier publié et le jour de rattrapage qui
+    les suit : son écart couvre plusieurs jours, ce n'est pas une valeur quotidienne.
+    Les flux négatifs (baisse de cumul) sont ramenés à 0, comme dans les sommes.
+    """
     points = []
     for i, p in enumerate(series):
-        value = window_total(series, i, key, days)
-        if value is not None:
-            points.append({"date": p["date"], "value": value, "has_gap": window_has_gap(series, i, days)})
+        if p[key] is None:  # premier jour : pas de fichier précédent
+            continue
+        catch_up = i > 0 and series[i - 1]["is_gap"]
+        points.append({"date": p["date"], "value": max(p[key], 0), "has_gap": p["is_gap"] or catch_up})
     if last_n_days:
         points = points[-last_n_days:]
     return points
@@ -222,48 +236,117 @@ def trend(value, threshold=STABLE_THRESHOLD):
     return "up" if value > 0 else "down"
 
 
-def has_min_volume(kpis, metric):
-    """Vrai si l'une des deux semaines comparées atteint SIGNAL_MIN_BASE pour cette mesure."""
-    weeks = (kpis.get(metric), kpis.get(f"previous_{metric}"))
-    return max((w or 0) for w in weeks) >= SIGNAL_MIN_BASE[metric]
+def relative_change(local_pct, national_pct):
+    """Évolution relative à la tendance nationale ; None si non calculable."""
+    if local_pct is None or national_pct is None or national_pct <= -1:
+        return None
+    return (1 + local_pct) / (1 + national_pct) - 1
 
 
-def detect_signals(location_kpis, national_kpis):
-    """Signaux à examiner pour une académie (liste vide si rien de notable).
+def reaches(value, threshold):
+    """|value| ≥ threshold, tolérant aux arrondis flottants (−20 % pile atteint le seuil de 20 %)."""
+    return value is not None and abs(value) >= threshold - 1e-9
 
-    Même référence que les KPI et la carte : 7 derniers jours vs 7 précédents.
-    - écart de diffusion : l'évolution des nouveaux comptes de l'académie s'écarte
-      de l'évolution nationale d'au moins SIGNAL_WATCH_GAP (« watch ») ou
-      SIGNAL_MIN_GAP (« strong ») ; ce qui est commun à tout le territoire s'annule ;
-    - activation (l'usage ne suit pas) : nouveaux comptes en hausse et intensité
-      stable (« watch ») ou en baisse (« strong ») ; même règle qu'au niveau national.
-    L'activité (messages) n'est pas un signal en soi : elle sert de contexte et
-    de garde-fou de volume pour l'intensité.
-    Les volumes trop faibles (voir `has_min_volume`) sont ignorés.
+
+def has_period_volume(kpis, metric, days):
+    """Vrai si les deux périodes comparées atteignent chacune le volume minimal."""
+    minimum = MIN_PERIOD_VOLUME[days][metric]
+    return all((kpis.get(k) or 0) >= minimum for k in (metric, f"previous_{metric}"))
+
+
+def comparison_start(end_date, days):
+    """Premier jour de la période précédente : la comparaison couvre 2 × `days` jours."""
+    return end_date - timedelta(days=2 * days - 1)
+
+
+def window_boundary_gap(missing_dates, end_date, days):
+    """Vrai si un rattrapage de jour non publié traverse une limite des périodes comparées.
+
+    Un jour manquant est rattrapé le premier jour publié suivant. Un trou situé
+    entièrement dans une période ne fausse pas son total ; il le fausse s'il
+    tombe la veille du début de la période précédente, le dernier jour de la
+    période précédente (rattrapage dans la période récente) ou le dernier jour
+    de la période récente (rattrapage après la fin).
     """
+    boundaries = (comparison_start(end_date, days) - timedelta(days=1),
+                  end_date - timedelta(days=days), end_date)
+    return any(d in missing_dates for d in boundaries)
+
+
+def display_pct(value):
+    """Pourcentage entier pour l'affichage, arrondi vers zéro avec la même tolérance que `reaches` :
+    −19,75 % s'affiche −19 % (le seuil de 20 % n'est pas atteint) ; −0,1999999… s'affiche −20 %."""
+    if value is None:
+        return None
+    return math.trunc(round(value * 100, 6))
+
+
+def detect_signals(kpis7, reference7, kpis14, reference14, blocked=None):
+    """Signaux territoriaux d'une académie (liste vide si rien de notable).
+
+    La semaine sert à voir, la quinzaine à décider. Référence : tendance de l'ensemble
+    des académies.
+    - diffusion, 14 jours : écart relatif d'au moins ACTION_REL, volumes suffisants sur
+      les deux périodes, CONFIRMÉ par la dernière semaine (écart sur 7 jours hors zone
+      stable, dans le même sens, avec au moins le volume hebdomadaire minimal) -> « strong » ;
+      sinon « watch » avec sa raison ; si la dernière semaine va nettement en sens
+      contraire, c'est ce signal récent qui est retenu ;
+    - diffusion, 7 jours : sinon, écart relatif d'au moins WATCH_REL -> « watch » ;
+    - activation, 14 jours : nouveaux comptes en hausse et intensité relative en baisse
+      (« strong ») ou stable (« watch ») ; jamais en même temps qu'un ralentissement fort.
+    `blocked` : raison pour laquelle aucune action ne peut être déclenchée (données
+    incomplètes, périmètre modifié, vacances propres à l'académie) ; un signal fort est
+    alors rétrogradé en « watch » avec cette raison.
+    """
+    def level(strong, reason=None):
+        reason = reason or blocked
+        return ("strong", None) if strong and not reason else ("watch", reason if strong else None)
+
+    rel7 = relative_change(kpis7.get("new_users_change_pct"), reference7.get("new_users_change_pct"))
+    rel14 = relative_change(kpis14.get("new_users_change_pct"), reference14.get("new_users_change_pct"))
+    vol7 = has_period_volume(kpis7, "new_users", WATCH_DAYS)
+    vol14 = has_period_volume(kpis14, "new_users", ACTION_DAYS)
+    week7 = (WATCH_DAYS, rel7, kpis7, reference7, False, None)
+
+    diffusion = None
+    if reaches(rel14, ACTION_REL) and vol14:
+        if not vol7:
+            unconfirmed = "volume insuffisant sur la dernière semaine"
+        elif trend(rel7) != trend(rel14):
+            unconfirmed = "tendance sur 14 jours non confirmée par la dernière semaine"
+        else:
+            unconfirmed = None
+        opposite = vol7 and reaches(rel7, WATCH_REL) and (rel7 > 0) != (rel14 > 0)
+        # Une dernière semaine nettement contraire n'est pas masquée par la tendance sur 14 jours.
+        diffusion = week7 if unconfirmed and opposite else (ACTION_DAYS, rel14, kpis14, reference14, True, unconfirmed)
+    elif reaches(rel7, WATCH_REL) and vol7:
+        diffusion = week7
+
     signals = []
-    evolution = location_kpis.get("new_users_change_pct")
-    national = national_kpis.get("new_users_change_pct")
-    has_users = evolution is not None and has_min_volume(location_kpis, "new_users")
-    if has_users and national is not None:
-        gap = evolution - national
-        if abs(gap) >= SIGNAL_WATCH_GAP:
-            signals.append({
-                "kind": "ecart_superieur" if gap > 0 else "ecart_inferieur",
-                "metric": "new_users",
-                "level": "strong" if abs(gap) >= SIGNAL_MIN_GAP else "watch",
-                "evolution": evolution,
-                "national": national,
-                "gap": gap,
-                "severity": abs(gap),
-            })
-    intensity = location_kpis.get("activity_change_pct")
-    if has_users and has_min_volume(location_kpis, "messages") and intensity is not None \
-            and trend(evolution) == "up" and trend(intensity) != "up":
+    if diffusion:
+        days, rel, k, ref, strong, unconfirmed = diffusion
+        lvl, reason = level(strong, unconfirmed)
         signals.append({
-            "kind": "activation", "metric": "both",
-            "level": "strong" if trend(intensity) == "down" else "watch",
-            "evolution_users": evolution, "evolution_intensity": intensity,
-            "severity": evolution - intensity,
+            "kind": "ecart_superieur" if rel > 0 else "ecart_inferieur", "metric": "new_users",
+            "window": days, "level": lvl, "reason": reason, "relative": rel, "relative7": rel7,
+            # Les deux horizons, côte à côte (None si le volume ne permet pas de conclure).
+            "relative14": rel14 if vol14 else None,
+            "display": {"rel14": display_pct(rel14 if vol14 else None), "rel7": display_pct(rel7 if vol7 else None)},
+            "evolution": k["new_users_change_pct"], "national": ref["new_users_change_pct"],
+            "previous": k["previous_new_users"], "current": k["new_users"], "severity": abs(rel),
+        })
+    slowdown = any(s["kind"] == "ecart_inferieur" and s["level"] == "strong" for s in signals)
+    users = kpis14.get("new_users_change_pct")
+    intensity = relative_change(kpis14.get("activity_change_pct"), reference14.get("activity_change_pct"))
+    if (not slowdown and intensity is not None and users is not None and users > 0
+            and reaches(users, STABLE_THRESHOLD) and not (intensity > 0 and reaches(intensity, STABLE_THRESHOLD))
+            and vol14 and has_period_volume(kpis14, "messages", ACTION_DAYS)):
+        lvl, reason = level(intensity < 0 and reaches(intensity, STABLE_THRESHOLD))
+        signals.append({
+            "kind": "activation", "metric": "both", "window": ACTION_DAYS, "level": lvl, "reason": reason,
+            "evolution_users": users, "evolution_intensity": intensity,
+            "display": {"users": display_pct(users), "intensity": display_pct(intensity)},
+            "previous": kpis14["previous_new_users"], "current": kpis14["new_users"],
+            "severity": users - intensity,
         })
     return sorted(signals, key=lambda s: (s["level"] != "strong", -s["severity"]))

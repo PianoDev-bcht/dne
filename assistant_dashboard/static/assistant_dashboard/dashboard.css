@@ -115,26 +115,29 @@ section[id], [id="kpi"] { scroll-margin-top: 16px; }
 
 /* Actions recommandées : quand → qui (avec le chiffre) → quoi, dans le même ordre pour les trois cartes.
    Chaque carte garde sa hauteur naturelle (pas de vide sous une liste courte). Sans couleur d'alerte. */
+.reco-notice { margin: 2px 0 0; font-size: var(--fs-small); color: var(--muted); }
 .reco-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 12px; align-items: start; }
 .reco { border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; display: grid; gap: 10px; }
 .reco-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .reco h3 { margin: 0; font-size: var(--fs-title); display: flex; align-items: baseline; gap: 10px; }
 .reco-num { font-size: var(--fs-body); font-weight: 700; color: var(--accent); letter-spacing: .04em; font-variant-numeric: tabular-nums; }
 .reco p { margin: 0; font-size: var(--fs-body); }
-.reco-when { color: var(--muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.reco-when { color: var(--muted); }
+.reco-when .info { margin-left: 4px; vertical-align: -2px; }
 .reco-action { color: var(--text); font-weight: 600; padding-top: 10px; border-top: 1px solid var(--border); }
 .reco-action > span { color: var(--accent); margin-right: 4px; }
 .reco-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; align-content: flex-start; gap: 6px; }
 .reco-chip {
-  display: inline-flex; align-items: baseline; gap: 8px; padding: 4px 8px 4px 10px; border-radius: 6px;
+  display: inline-flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; row-gap: 2px; padding: 4px 8px 4px 10px; border-radius: 6px;
   border: 1px solid var(--border); background: var(--bg); font: inherit; font-size: var(--fs-body); font-weight: 600;
   color: var(--text); cursor: pointer; white-space: nowrap;
 }
 button.reco-chip:hover { border-color: var(--muted); background: var(--surface); }
 button.reco-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.reco-chip.is-national { cursor: default; background: var(--surface); }
+.reco-chip-vol { flex-basis: 100%; font-size: var(--fs-small); font-weight: 400; color: var(--muted); }
 .reco-chip-val { font-weight: 600; font-size: var(--fs-small); color: var(--text-2); font-variant-numeric: tabular-nums; }
-.reco-chip .chev { font-size: var(--fs-body); }
+.reco-chip { position: relative; padding-right: 24px !important; }
+.reco-chip .chev { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); font-size: var(--fs-body); }
 .reco-more { margin-top: 6px; font-size: var(--fs-small); }
 .reco-more summary { cursor: pointer; font-weight: 600; color: var(--text-2); width: fit-content; }
 .reco-more summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
@@ -202,25 +205,38 @@ button.reco-chip:focus-visible { outline: 2px solid var(--accent); outline-offse
 .icon-button:hover { color: var(--text); border-color: var(--border); }
 
 /* Signaux à examiner */
+.panel-sub { margin: 0 0 4px; font-size: var(--fs-small); color: var(--muted); }
 .signals-scroll { flex: 1; overflow-y: auto; min-height: 0; margin: 0 -4px; padding: 0 4px; }
-.sig-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 14px 0 4px; }
+/* Chaque groupe est un petit tableau : nom | 14 jours | 7 jours | chevron (en-têtes une seule fois). */
+.sig-cols, .sig-row { display: grid; grid-template-columns: minmax(0, 1fr) 76px 64px 12px; gap: 8px; align-items: baseline; }
+.sig-cols { padding: 0 4px; margin-top: 4px; }
+.sig-head { margin: 16px 0 2px; padding: 0 4px; }
+.sig-col { font-size: var(--fs-small); color: var(--muted); text-align: right; }
 .sig-head > span:first-child { font-size: var(--fs-small); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--text-2); }
 .signals { list-style: none; margin: 0; padding: 0; }
 .sig-row {
-  width: 100%; display: grid; grid-template-columns: auto minmax(0, 1fr) 12px; gap: 10px; align-items: baseline;
+  width: 100%;
   border: 0; border-top: 1px solid var(--border); background: none; padding: 9px 4px; font: inherit; color: var(--text);
   text-align: left; cursor: pointer; border-radius: 4px;
 }
 .sig-row:hover, .sig-row:focus-visible { background: var(--surface); }
-.sig-name { font-weight: 600; font-size: var(--fs-body); white-space: nowrap; }
-/* « À surveiller » : repliés sous le groupe, en retrait (contraste plutôt qu'étiquette). */
+.sig-name { font-weight: 600; font-size: var(--fs-body); min-width: 0; overflow-wrap: anywhere; }
+/* « À suivre » : repliés sous le groupe, en retrait (contraste plutôt qu'étiquette). */
 .sig-row.watch .sig-name { font-weight: 400; color: var(--text-2); }
 .sig-more { margin-top: 2px; }
+.sig-cell { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sig-cell .change { font-size: var(--fs-body); }
+.sig-cell:not(.main) .change { font-weight: 500; }
+.sig-cell.na { color: var(--muted); font-size: var(--fs-small); }
+.sig-seg { white-space: nowrap; }
+.sig-h { color: var(--muted); font-size: var(--fs-small); }
+.sig-why { margin-left: 4px; vertical-align: 1px; }
+.sig-reason { display: block; font-size: var(--fs-small); font-weight: 400; color: var(--muted); }
+.sig-sub { margin: 0; padding: 4px 4px 2px; font-size: var(--fs-small); color: var(--muted); }
 .sig-more summary { cursor: pointer; padding: 6px 4px; font-size: var(--fs-small); font-weight: 600; color: var(--text-2); width: fit-content; }
 .sig-more summary:hover { color: var(--text); }
 .sig-more summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
 .signals-none { margin: 0; padding: 8px 4px; font-size: var(--fs-small); color: var(--muted); border-top: 1px solid var(--border); }
-.sig-row > :nth-child(2) { justify-self: end; text-align: right; }
 .sig-row .change { font-size: var(--fs-body); }
 .sig-div { font-size: var(--fs-small); color: var(--text-2); text-align: right; }
 .sig-div .change { font-size: var(--fs-body); }
@@ -229,6 +245,8 @@ button.reco-chip:focus-visible { outline: 2px solid var(--accent); outline-offse
 .pick { width: 100%; margin-top: 12px; }
 
 /* Détail académie */
+.loc-14 { margin: 0 0 10px; font-size: var(--fs-small); color: var(--text-2); }
+.loc-14 .change { font-size: var(--fs-small); }
 .signal-note { margin: 4px 0 10px; padding: 6px 10px; border-left: 3px solid #161616; background: var(--surface); font-size: var(--fs-small); color: var(--text-2); }
 .signal-note .change { font-size: var(--fs-small); }
 .loc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }

@@ -112,7 +112,7 @@
     let items;
     if (!isSequential()) {
       items = DIVERGING.map((b, i) => `<span class="item" data-cls="${i}">${sw(b.color)}${b.label}</span>`);
-      el.innerHTML = `<span class="title">vs 7 j préc.</span>${items.join("")}`;
+      el.innerHTML = `<span class="title">Évolution sur 7 jours</span>${items.join("")}`;
     } else {
       // Classes en intervalles semi-ouverts : « < 120 », « 120–150 », …, « ≥ 170 ».
       if (!locations.some((l) => l[currentMetric()] != null)) { el.innerHTML = ""; return; }
@@ -124,7 +124,7 @@
           : `${fmtInt(breaks[i - 1])}–${fmtInt(breaks[i])}`;
         return `<span class="item" data-cls="${i}">${sw(seqColor(i, n))}${label}</span>`;
       });
-      el.innerHTML = `<span class="title">${f.title} · 7 j</span>${items.join("")}`;
+      el.innerHTML = `<span class="title">${f.title} sur 7 jours</span>${items.join("")}`;
     }
   }
 
@@ -137,46 +137,57 @@
     return `<span class="change ${t}"><span aria-hidden="true">${ARROWS[t]}</span> ${fmtPct0(pct)}</span>`;
   }
 
-  // Niveau calculé côté serveur : « strong » (à investiguer) ou « watch » (à surveiller).
-  const LEVEL = { strong: "À investiguer", watch: "À surveiller" };
+  // Niveau calculé côté serveur : « strong » (à analyser) ou « watch » (à suivre).
+  const LEVEL = { strong: "À analyser", watch: "À suivre" };
   /** Pourcentage coloré sans flèche (lignes à deux valeurs : la couleur porte le sens). */
   const plainPct = (pct) => `<span class="change ${trend(pct)}">${fmtPct0(pct)}</span>`;
 
-  /** Phrase complète d'un signal (encadré du panneau académie). */
+  /** Phrase complète d'un signal (encadré du panneau académie), avec les valeurs affichées par Python. */
   function signalSentence(s) {
+    const why = s.reason ? `. Aucune action proposée : ${s.reason}` : "";
     if (s.kind === "activation") {
-      return `${LEVEL[s.level]} : l’usage ne suit pas (nouveaux comptes ${plainPct(s.evolution_users)}, intensité ${plainPct(s.evolution_intensity)})`;
+      return `<strong>${LEVEL[s.level]}</strong> : usage en deçà de la diffusion sur ${s.window} jours (nouveaux comptes ` +
+        `${plainPct(s.display.users / 100)}, intensité ${plainPct(s.display.intensity / 100)} par rapport à la tendance des académies)${why}.`;
     }
-    return `${LEVEL[s.level]} : nouveaux comptes ${arrowValue(s.evolution)} en 7 jours (France ${fmtPct0(s.national)})`;
+    const shown = s.window === 14 ? s.display.rel14 : s.display.rel7;
+    return `<strong>${LEVEL[s.level]}</strong> : diffusion ${arrowValue(shown / 100)} par rapport à la tendance des académies sur ${s.window} jours${why}.`;
   }
 
   // Trois groupes, dans l'ordre des actions 01 / 02 / 03. Le sens de l'écart (`kind`) et le niveau
-  // (`level`) viennent du serveur. Les signaux forts sont visibles ; les « à surveiller » sont repliés.
+  // (`level`) viennent du serveur. Les signaux forts sont visibles ; les « à suivre » sont repliés.
   const SIGNAL_BLOCKS = [
-    { key: "accel", title: "En accélération", match: (s) => s.kind === "ecart_superieur" },
-    { key: "slow", title: "En ralentissement", match: (s) => s.kind === "ecart_inferieur" },
-    { key: "usage", title: "L’usage ne suit pas", match: (s) => s.kind === "activation" },
+    { key: "accel", title: "Diffusion au-dessus de la tendance", match: (s) => s.kind === "ecart_superieur" },
+    { key: "slow", title: "Diffusion en dessous de la tendance", match: (s) => s.kind === "ecart_inferieur" },
+    { key: "usage", title: "Usage en deçà de la diffusion (14 jours)", match: (s) => s.kind === "activation" },
   ];
 
-  /** Valeur d'une ligne de signal et son infobulle. */
-  function signalRow(s) {
-    if (s.kind === "activation") {
-      return { html: `<span class="sig-div">comptes ${plainPct(s.evolution_users)} · intensité ${plainPct(s.evolution_intensity)}</span>`,
-        title: "Nouveaux comptes en hausse, intensité stable ou en baisse" };
-    }
-    return { html: arrowValue(s.evolution), title: `France : ${fmtPct0(s.national)}` };
-  }
+  // Raison d'une action retenue, en clair et court (le détail reste dans l'infobulle).
+  const SHORT_REASON = (r) => r.startsWith("tendance sur 14 jours non confirmée") ? "non confirmée par la dernière semaine"
+    : r.split(" (")[0];  // ex. « vacances d'hiver (13/02–28/02) » -> « vacances d'hiver »
+
+
+  /** Cellule chiffrée : flèche et gras pour l'horizon de la règle, valeur simple pour l'autre.
+      `shown` : pourcentage entier calculé par Python (arrondi vers zéro, voir `metrics.display_pct`). */
+  const cell = (shown, main) => shown == null ? `<span class="sig-cell na">n.d.</span>`
+    : `<span class="sig-cell${main ? " main" : ""}">${main ? arrowValue(shown / 100) : plainPct(shown / 100)}</span>`;
 
   function signalItem(r) {
-    const row = signalRow(r.s);
-    return `<li><button type="button" class="sig-row ${r.s.level}" data-id="${r.id}" title="${escapeHtml(row.title)}">` +
-      `<span class="sig-name">${escapeHtml(r.name)}</span>${row.html}<span class="chev" aria-hidden="true">›</span></button></li>`;
+    const s = r.s;
+    const cells = s.kind === "activation"
+      ? cell(s.display.users, false) + cell(s.display.intensity, true)
+      : cell(s.display.rel7, s.window === 7) + cell(s.display.rel14, s.window === 14);
+    // Raison d'un signal non retenu comme action : petite infobulle à côté du nom, pas de texte permanent.
+    const reason = s.reason ? ` <span class="info tip-right sig-why" data-tip="${escapeHtml(`Aucune action proposée : ${SHORT_REASON(s.reason)}.`)}">i</span>` : "";
+    return `<li><button type="button" class="sig-row ${s.level}" data-id="${r.id}">` +
+      `<span class="sig-name">${escapeHtml(r.name)}${reason}</span>${cells}<span class="chev" aria-hidden="true">›</span></button></li>`;
   }
+
+  const colsRow = (a, b) => `<div class="sig-cols"><span></span><span class="sig-col">${a}</span><span class="sig-col">${b}</span><span></span></div>`;
 
   function renderSignals(signals) {
     const box = document.getElementById("signals");
     if (!signals.length) {
-      box.innerHTML = `<p class="signals-empty">Aucun écart marqué cette semaine.</p>`;
+      box.innerHTML = `<p class="signals-empty">Aucun écart au-delà des seuils.</p>`;
       return;
     }
     const rows = signals.flatMap((g) => g.signals.map((s) => ({ id: g.id, name: g.name, s })));
@@ -184,13 +195,18 @@
       const items = rows.filter((r) => blk.match(r.s)).sort((a, b) => b.s.severity - a.s.severity);
       if (!items.length) return "";
       const strong = items.filter((r) => r.s.level === "strong"), watch = items.filter((r) => r.s.level !== "strong");
-      const list = strong.length ? `<ul class="signals">${strong.map(signalItem).join("")}</ul>`
-        : `<p class="signals-none">Aucun signal fort.</p>`;
-      const more = watch.length ? `<details class="sig-more"><summary>+ ${watch.length} à surveiller</summary>` +
-        `<ul class="signals">${watch.map(signalItem).join("")}</ul></details>` : "";
+      // Les « à suivre » ne sont repliés que sous des signaux forts ; sinon ils sont affichés directement.
+      const list = strong.length ? `<ul class="signals">${strong.map(signalItem).join("")}</ul>` : "";
+      const more = !watch.length ? "" : strong.length
+        ? `<details class="sig-more"><summary>${watch.length} académie${watch.length > 1 ? "s" : ""} à suivre</summary><ul class="signals">${watch.map(signalItem).join("")}</ul></details>`
+        : `<p class="sig-sub">À suivre</p><ul class="signals">${watch.map(signalItem).join("")}</ul>`;
       // Pas de rappel « France » en tête : le KPI du haut le donne, et l'infobulle de chaque ligne aussi.
-      return `<div class="sig-head"><span>${blk.title}</span></div>${list}${more}`;
+      // Titre de groupe sur toute la largeur ; le groupe « usage » a ses propres colonnes.
+      const own = blk.key === "usage" ? colsRow("Comptes", "Intensité") : "";
+      return `<div class="sig-head"><span>${blk.title}</span></div>${own}${list}${more}`;
     }).join("");
+    // En-têtes de colonnes des groupes de diffusion, écrits une seule fois en haut du panneau.
+    box.innerHTML = colsRow("7 jours", "14 jours") + box.innerHTML;
   }
 
   // ---------------------------------------------------------------- panneau académie
@@ -210,13 +226,18 @@
     const note = document.getElementById("location-signal-note");
     const signals = d.signals || [];
     note.hidden = !signals.length;
-    note.innerHTML = signals.length ? `Signal : ${signals.map(signalSentence).join(" ; ")}` : "";
+    note.innerHTML = signals.length ? signals.map(signalSentence).join("<br>") : "";
+    // Le chiffre qui décide des actions : 14 jours, relativement à la tendance nationale.
+    const k14 = d.kpis14 || {}, line14 = document.getElementById("location-14"), rel14 = d.relative_14;
+    line14.hidden = k14.new_users == null;
+    line14.innerHTML = `Sur 14 jours : ${fmtInt(k14.new_users)} nouveaux comptes contre ${fmtInt(k14.previous_new_users)}` +
+      (rel14 == null ? ", volume insuffisant pour conclure." : `, soit ${arrowValue(rel14 / 100)} par rapport à la tendance des académies.`);
     const set = (key, html) => { document.querySelector(`#panel-location [data-stat="${key}"]`).innerHTML = html; };
     // Même ligne de variation que les cartes nationales : % coloré, puis la référence nationale,
     // ou « volume insuffisant » quand la base de la semaine précédente est trop faible (calculé côté serveur).
     const low = d.low_volume || {};
     const change = (pct, natPct, isLow) => `${changeHtml(pct)} <span class="metric-ref">` +
-      (isLow ? "volume insuffisant" : `moyenne nat. ${fmtPct(natPct)}`) + "</span>";
+      (isLow ? "volume insuffisant pour conclure" : `tendance nationale : ${fmtPct(natPct)}`) + "</span>";
     set("new_users", fmtInt(k.new_users));
     set("new_users_change", change(k.new_users_change_pct, nat.new_users_change_pct, low.new_users));
     set("messages", fmtInt(k.messages));
@@ -243,7 +264,7 @@
   ];
 
   // Calendrier scolaire (toutes zones) et jours fériés : ils expliquent des variations temporaires.
-  // Bornes = dates d'activité ; les fins de fenêtre de 7 jours y tombant sont grisées.
+  // Bornes = dates d'activité : les jours concernés sont grisés.
   const ANNOTATIONS = [
     { from: "2026-07-04", to: "2026-08-31", label: "Vacances d'été" },
     { from: "2026-10-17", to: "2026-11-01", label: "Toussaint" },
@@ -290,8 +311,8 @@
     },
   };
 
-  // Les fenêtres de 7 jours contenant des jours non publiés ne sont pas tracées :
-  // le cumul reporté y donnerait un creux puis un pic de rattrapage artificiels.
+  // Les jours sans fichier publié et le jour de rattrapage qui suit ne sont pas tracés :
+  // ils donneraient un creux à zéro puis un pic artificiels.
   const observed = (p) => (p.has_gap ? null : p.value);
 
   function indexed(points) {
@@ -340,7 +361,7 @@
           legend: { display: false },
           tooltip: {
             callbacks: {
-              title: (items) => "7 jours se terminant le " + new Date(items[0].label).toLocaleDateString("fr-FR"),
+              title: (items) => new Date(items[0].label).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" }),
               label: (item) => `${item.dataset.label} : ${fmtInt(item.dataset.raw[item.dataIndex])} · indice ${fmtInt(item.raw)}`,
             },
           },
@@ -404,8 +425,8 @@
   function tooltipHtml(l) {
     const f = fam();
     const name = `<strong>${escapeHtml(l.full_name)}</strong><br>`;
-    const low = l.low_volume && l.low_volume[f.base] ? " · volume insuffisant" : "";
-    return `${name}${fmtInt(l[f.volume])} ${f.noun} · ${fmtPct(l[f.change])} vs 7 j préc.${low}`;
+    const low = l.low_volume && l.low_volume[f.base] ? " · volume insuffisant pour conclure" : "";
+    return `${name}${fmtInt(l[f.volume])} ${f.noun} · ${fmtPct(l[f.change])} par rapport aux 7 jours précédents${low}`;
   }
 
   function baseStyle(l, breaks) {

@@ -16,22 +16,22 @@ def reco_status(kpis, signals):
     """
     def academies(match):
         """Académies concernées avec le signal qui les déclenche, le plus marqué en premier."""
-        found = [{"id": g["id"], "name": g["name"], **s}
+        found = [{"id": g["id"], "name": g["name"], **s,
+                  # Valeurs affichées : entiers calculés par `metrics.display_pct`, en ratio pour les filtres.
+                  "shown": {k: (v / 100 if v is not None else None) for k, v in s["display"].items()}}
                  for g in signals for s in g["signals"] if match(s)]
         return sorted(found, key=lambda a: -a["severity"])
 
     def strong_diffusion(kind):
         return lambda s: s["metric"] == "new_users" and s["kind"] == kind and s["level"] == "strong"
 
-    # Seuls les signaux forts déclenchent une action ; les signaux « à surveiller » restent dans le diagnostic.
+    # Seuls les signaux forts déclenchent une action ; les signaux « à suivre » restent dans le diagnostic.
     return {
         "acceleration": academies(strong_diffusion("ecart_superieur")),
         "slowdown": academies(strong_diffusion("ecart_inferieur")),
-        # Comptes en hausse, intensité en baisse : l'usage ne suit pas la diffusion.
+        # Comptes en hausse, intensité en baisse relativement à la tendance nationale.
+        # Les actions ne concernent que des académies (jamais la France entière).
         "activation": academies(lambda s: s["kind"] == "activation" and s["level"] == "strong"),
-        # Au niveau national : diffusion en hausse, intensité stable ou en baisse.
-        "activation_national": metrics.trend(kpis["new_users_change_pct"]) == "up"
-        and kpis["activity_change_pct"] is not None and metrics.trend(kpis["activity_change_pct"]) != "up",
     }
 
 
@@ -43,10 +43,9 @@ def dashboard(request):
         "freshness": data.freshness(),
         "unlocated": data.unlocated_summary(payload),
         "reco": reco_status(kpis, payload["signals"]),
+        "action_status": payload["action_status"],
         "academies": sorted(BetaLocation.objects.defer("geo_shape"), key=lambda l: normalize_name(l.display_name)),
-        "signal_thresholds": {"min_base": metrics.SIGNAL_MIN_BASE, "min_gap_pts": round(metrics.SIGNAL_MIN_GAP * 100),
-                              "watch_gap_pts": round(metrics.SIGNAL_WATCH_GAP * 100),
-                              "stable_pct": round(metrics.STABLE_THRESHOLD * 100)},
+        "signal_thresholds": data.signal_thresholds(),
     })
 
 
@@ -84,19 +83,28 @@ def api_shapes(request):
 
 def api_location(request, pk):
     location = get_object_or_404(BetaLocation, pk=pk)
-    series = data.location_series(location)
-    kpis = compute_kpis(series)
-    national = compute_kpis(data.national_series())
+    series_by_domain = data._domain_series(data.ProductionObservation.objects.all())
+    ctx = data.signal_context(series_by_domain)
+    domains = data._domain_series(data.ProductionObservation.objects.filter(location=location))
+    series, kpis, kpis14, signals = data.academy_signals(location, domains, ctx)
+    national = ctx["national7"]
     return JsonResponse({
         "scope": "location",
         "id": location.pk,
         "name": location.display_name,
         "full_name": location.full_name,
         "kpis": data.serialize_kpis(kpis),
-        "signals": metrics.detect_signals(kpis, national),
+        "signals": signals,
+        "kpis14": data.serialize_kpis(kpis14),
         "low_volume": data.low_volume(kpis),
         # Contexte « France » du panneau, servi avec l'académie (pas de dépendance à l'ordre des requêtes).
         "national": {k: national[k] for k in ("new_users_change_pct", "messages_change_pct", "activity_per_100_accounts",
                                               "activity_change_pct")},
+        # Le chiffre qui décide des actions : 14 jours, relativement à la tendance nationale.
+        # Écart à la tendance des académies sur 14 jours, affiché arrondi vers zéro ; None si le volume
+        # ne permet pas de conclure (ex. 2 comptes contre 55).
+        "relative_14": metrics.display_pct(metrics.relative_change(
+            kpis14["new_users_change_pct"], ctx["reference14"]["new_users_change_pct"]))
+        if metrics.has_period_volume(kpis14, "new_users", metrics.ACTION_DAYS) else None,
         "chart": data.chart_payload(series, request.GET.get("period", data.DEFAULT_PERIOD)),
     })

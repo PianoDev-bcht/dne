@@ -1,10 +1,9 @@
 {% load dashboard_format %}{% comment %}
   Académies concernées par une action, avec le chiffre qui les déclenche.
   Les 4 premières sont visibles ; les suivantes sous « + N autres ».
-{% endcomment %}{% if items or national %}<ul class="reco-chips">
-  {% if national %}<li><span class="reco-chip is-national">France <span class="reco-chip-val">comptes {{ kpis.new_users_change_pct|fr_pct0 }} · intensité {{ kpis.activity_change_pct|fr_pct0 }}</span></span></li>{% endif %}
+{% endcomment %}{% if items %}<ul class="reco-chips">
   {% for a in items|slice:":4" %}{% include "assistant_dashboard/_reco_chip.html" %}{% endfor %}
 </ul>{% if items|length > 4 %}<details class="reco-more">
   <summary>+ {{ items|length|add:"-4" }} autre{{ items|length|add:"-4"|pluralize }}</summary>
   <ul class="reco-chips">{% for a in items|slice:"4:" %}{% include "assistant_dashboard/_reco_chip.html" %}{% endfor %}</ul>
-</details>{% endif %}{% else %}<p class="reco-empty">Aucune académie cette semaine</p>{% endif %}
+</details>{% endif %}{% else %}<p class="reco-empty">Aucune académie concernée à ce jour</p>{% endif %}

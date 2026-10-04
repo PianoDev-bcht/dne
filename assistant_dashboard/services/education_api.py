@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 BETA_DATASET = "assistant-ia-dinum-deploiement-au-ministere-de-leducation-nationale-en-academie"
 PRODUCTION_DATASET = "fr-en-assistant_ia_deploiement_menjs"
 CONTOURS_DATASET = "fr-en-contour-academies-2020"
+CALENDAR_DATASET = "fr-en-calendrier-scolaire"
 
 TIMEOUT = (5, 30)  # (connexion, lecture) en secondes
 PAGE_SIZE = 100  # maximum autorisé par l'endpoint /records
@@ -56,8 +57,11 @@ def _get(url, params=None, session=None):
     raise EducationAPIError(last_error)
 
 
-def fetch_all_records(dataset, session=None, page_size=PAGE_SIZE):
-    """Récupère tous les enregistrements d'un dataset en suivant la pagination."""
+def fetch_all_records(dataset, session=None, page_size=PAGE_SIZE, where=None):
+    """Récupère tous les enregistrements d'un dataset en suivant la pagination.
+
+    `where` : filtre ODSQL optionnel (ex. années scolaires du calendrier).
+    """
     url = f"{settings.EDUCATION_API_BASE}/{dataset}/records/"
     records, offset, total = [], 0, None
     while total is None or offset < total:
@@ -65,7 +69,10 @@ def fetch_all_records(dataset, session=None, page_size=PAGE_SIZE):
             raise EducationAPIError(
                 f"Plus de {MAX_OFFSET} enregistrements : utiliser l'endpoint /exports."
             )
-        payload = _get(url, {"limit": page_size, "offset": offset, "lang": "fr"}, session)
+        params = {"limit": page_size, "offset": offset, "lang": "fr"}
+        if where:
+            params["where"] = where
+        payload = _get(url, params, session)
         total = payload.get("total_count", 0)
         page = payload.get("results", [])
         records.extend(page)

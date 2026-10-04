@@ -82,6 +82,31 @@ class ProductionObservation(models.Model):
         return cls.objects.aggregate(latest=models.Max("date"))["latest"]
 
 
+class SchoolHoliday(models.Model):
+    """Période de vacances scolaires d'une académie (dataset `fr-en-calendrier-scolaire`).
+
+    Sert de contexte : une comparaison sur 14 jours qui recouvre des vacances
+    propres à l'académie (non communes aux zones A, B et C) ne déclenche pas
+    d'action (le signal reste « à suivre »).
+    """
+
+    location = models.ForeignKey(BetaLocation, on_delete=models.CASCADE, related_name="holidays")
+    description = models.CharField(max_length=200)
+    start = models.DateField()  # premier jour de vacances (heure de Paris)
+    end = models.DateField()    # dernier jour de vacances
+    school_year = models.CharField(max_length=9)  # ex. "2026-2027"
+    zone = models.CharField(max_length=50, blank=True)  # ex. "Zone A", "Réunion"
+
+    class Meta:
+        ordering = ["location", "start"]
+        constraints = [
+            models.UniqueConstraint(fields=["location", "description", "start"], name="unique_holiday_period")
+        ]
+
+    def __str__(self):
+        return f"{self.location} {self.description} {self.start}–{self.end}"
+
+
 class ImportRun(models.Model):
     STATUS_RUNNING = "running"
     STATUS_SUCCESS = "success"
